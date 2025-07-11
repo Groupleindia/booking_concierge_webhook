@@ -741,13 +741,22 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        let durationHours = Array.isArray(params.duration_value) ? params.duration_value[0] : params.duration_value;
-        if (params.duration && !durationHours) { // If duration is present but duration_value (number) is not
+        // --- FIX START ---
+        let durationHours = 0; // Initialize durationHours to 0
+        // Check if params.duration is a string before attempting to use .match()
+        if (typeof params.duration === 'string' && params.duration) { 
             const durationMatch = params.duration.match(/(\d+)\s*hour/i);
             if (durationMatch && durationMatch[1]) {
                 durationHours = parseInt(durationMatch[1], 10);
             }
+        } else if (Array.isArray(params.duration_value) && params.duration_value.length > 0) {
+            // Fallback to duration_value if duration is not a string but duration_value is an array
+            durationHours = params.duration_value[0];
+        } else if (typeof params.duration_value === 'number') {
+            // Fallback if duration_value is directly a number
+            durationHours = params.duration_value;
         }
+        // --- FIX END ---
 
         // Update booking-flow context with duration if provided
         if (durationHours) {
@@ -780,7 +789,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const packageList = filteredPackages.map(p => {
-            const priceInfo = p.price_type === 'Per Person' ? `${p.price} per person` : `${p.price}`; // FIXED LINE
+            const priceInfo = p.price_type === 'Per Person' ? `${p.price} per person` : `${p.price}`;
             return `${p.name} (Cost: AED${priceInfo}, Inclusions: ${p.inclusions})`;
         }).join('; ');
 
