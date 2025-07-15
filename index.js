@@ -25,7 +25,7 @@ app.use(express.json()); // Middleware to parse JSON request bodies
 // IMPORTANT: Ensure these are set in your .env file on Glitch based on your Airtable setup:
 // BASE_ID=YOUR_AIRTABLE_BASE_ID (e.g., appXXXXXXXXXXXXXX)
 // AIRTABLE_TOKEN=YOUR_AIRTABLE_API_KEY (e.g., patXXXXXXXXXXXXXX)
-// AIRTABLE_VENUES_TABLE_ID=YOUR_VENUES_TABLE_ID (e.g., tblXXXXXXXXXXXXXX - from your "Venues" table)
+// AIRTABLE_VENUES_TABLE_ID=YOUR_VENTABLE_ID (e.g., tblXXXXXXXXXXXXXX - from your "Venues" table)
 // AIRTABLE_PACKAGES_TABLE_ID=YOUR_PACKAGES_TABLE_ID (e.g., tblYYYYYYYYYYYYYY - from your "Packages" table)
 // AIRTABLE_ADDONS_TABLE_ID=YOUR_ADDONS_TABLE_ID (e.g., tblZZZZZZZZZZZZZZ - from your "Add-Ons" table)
 // AIRTABLE_BOOKINGS_TABLE_ID=YOUR_BOOKINGS_TABLE_ID (e.g., tblAAAAAAAAAAAAAA - from your "Bookings" table)
@@ -741,22 +741,13 @@ app.post("/webhook", async (req, res) => {
             }
         }
 
-        // --- FIX START ---
-        let durationHours = 0; // Initialize durationHours to 0
-        // Check if params.duration is a string before attempting to use .match()
-        if (typeof params.duration === 'string' && params.duration) { 
+        let durationHours = Array.isArray(params.duration_value) ? params.duration_value[0] : params.duration_value;
+        if (params.duration && !durationHours) { // If duration is present but duration_value (number) is not
             const durationMatch = params.duration.match(/(\d+)\s*hour/i);
             if (durationMatch && durationMatch[1]) {
                 durationHours = parseInt(durationMatch[1], 10);
             }
-        } else if (Array.isArray(params.duration_value) && params.duration_value.length > 0) {
-            // Fallback to duration_value if duration is not a string but duration_value is an array
-            durationHours = params.duration_value[0];
-        } else if (typeof params.duration_value === 'number') {
-            // Fallback if duration_value is directly a number
-            durationHours = params.duration_value;
         }
-        // --- FIX END ---
 
         // Update booking-flow context with duration if provided
         if (durationHours) {
@@ -817,11 +808,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ✅ Select Package Intent (User selects specific packages from the list)
-    if (intent === "Select Package Intent") {
-        console.log(`DEBUG: Entering Select Package Intent.`);
+    if (intent === "Specify Package Intent") { // RENAMED FROM "Select Package Intent"
+        console.log(`DEBUG: Entering Specify Package Intent.`); // Updated log
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
-            console.log("DEBUG: Booking flow context missing or not group type in Select Package Intent.");
+            console.log("DEBUG: Booking flow context missing or not group type in Specify Package Intent."); // Updated log
             return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your group booking details. Please start over.") });
         }
 
