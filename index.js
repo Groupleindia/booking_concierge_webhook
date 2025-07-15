@@ -810,6 +810,7 @@ app.post("/webhook", async (req, res) => {
     // ✅ Select Package Intent (User selects specific packages from the list)
     if (intent === "Specify Package Intent") { // RENAMED FROM "Select Package Intent"
         console.log(`DEBUG: Entering Specify Package Intent.`); // Updated log
+        console.log(`DEBUG: Raw params for Specify Package Intent: ${JSON.stringify(params, null, 2)}`); // Added logging for params
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
             console.log("DEBUG: Booking flow context missing or not group type in Specify Package Intent."); // Updated log
