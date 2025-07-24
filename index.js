@@ -979,7 +979,10 @@ app.post("/webhook", async (req, res) => {
         }
 
         const bookingDetails = bookingFlowCtx.parameters;
-        const { person: fullName, 'phone-number': mobileNumber, email: emailAddress } = params;
+        // Corrected parameter extraction
+        const fullName = params.personName?.name || params.personName; // Handles both object and direct string for personName
+        const mobileNumber = params.phoneNumber;
+        const emailAddress = params.emailAddress;
 
         console.log(`DEBUG: Collected contact details - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
 
@@ -1041,9 +1044,9 @@ app.post("/webhook", async (req, res) => {
                 name: `${session}/contexts/awaiting-guest-details`,
                 lifespanCount: 2,
                 parameters: { // Pass back what was collected to maintain state
-                    person: fullName, 
-                    'phone-number': mobileNumber,
-                    email: emailAddress
+                    personName: fullName, // Use personName as per Dialogflow parameter name
+                    phoneNumber: mobileNumber, // Use phoneNumber as per Dialogflow parameter name
+                    emailAddress: emailAddress // Use emailAddress as per Dialogflow parameter name
                 }
             });
         }
