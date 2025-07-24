@@ -780,7 +780,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const packageList = filteredPackages.map(p => {
-            const priceInfo = p.price_type === 'Per Person' ? `${p.price} per person` : `${p.price}`;
+            const priceInfo = p.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
             return `${p.name} (Cost: AED${priceInfo}, Inclusions: ${p.inclusions})`;
         }).join('; ');
 
@@ -979,12 +979,16 @@ app.post("/webhook", async (req, res) => {
         }
 
         const bookingDetails = bookingFlowCtx.parameters;
-        // Corrected parameter extraction
-        const fullName = params.personName?.name || params.personName; // Handles both object and direct string for personName
-        const mobileNumber = params.phoneNumber;
-        const emailAddress = params.emailAddress;
+        // Corrected parameter extraction based on Dialogflow JSON structure
+        const fullName = params.personName?.name || ''; // Safely get name from object, default to empty string
+        const mobileNumber = params.phoneNumber || ''; // Default to empty string
+        const emailAddress = params.emailAddress || ''; // Default to empty string
 
         console.log(`DEBUG: Collected contact details - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
+        console.log(`DEBUG: fullName: '${fullName}' (Type: ${typeof fullName})`);
+        console.log(`DEBUG: mobileNumber: '${mobileNumber}' (Type: ${typeof mobileNumber})`);
+        console.log(`DEBUG: emailAddress: '${emailAddress}' (Type: ${typeof emailAddress})`);
+
 
         // Update bookingDetails with contact info in the context for persistence
         bookingDetails.full_name = fullName;
@@ -1002,11 +1006,12 @@ app.post("/webhook", async (req, res) => {
 
         // Check if all required contact details are present
         if (fullName && mobileNumber && emailAddress) {
+            console.log("DEBUG: All contact details present. Proceeding to summary.");
             // Generate summary for confirmation
             const { date, time } = formatDubai(bookingDetails.bookingUTC);
             const venueName = bookingDetails.venue || "the selected venue";
             const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
+            const addOnsSummary = bookingDetails.details_add_ons && bookingDetails.details_add_ons.length > 0 ? ` with ${bookingDetails.details_add_ons.join(' and ')} as add-ons` : '';
 
             let totalPrice = '';
             if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
@@ -1031,6 +1036,7 @@ app.post("/webhook", async (req, res) => {
             });
 
         } else {
+            console.log("DEBUG: Missing contact details. Prompting again.");
             // If not all contact details are present, prompt for them.
             let missingFields = [];
             if (!fullName) missingFields.push("full name");
