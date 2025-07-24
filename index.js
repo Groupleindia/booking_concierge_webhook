@@ -980,52 +980,86 @@ app.post("/webhook", async (req, res) => {
         }
 
         const bookingDetails = bookingFlowCtx.parameters;
-        const { person: fullName, 'phone-number': mobileNumber, email: emailAddress } = params;
+        // Correctly extract fullName from params.person, which can be an object or a string
+        const fullName = params.person?.name || params.person || ''; 
+        const mobileNumber = params['phone-number'] || '';
+        const emailAddress = params.email || '';
 
         console.log(`DEBUG: Collected contact details - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
 
-        // Update bookingDetails with contact info
+        // Update bookingDetails with contact info in the context for persistence
         bookingDetails.full_name = fullName;
         bookingDetails.mobile_number = mobileNumber;
         bookingDetails.email_id = emailAddress;
 
         let finalConfirmationPrompt;
-        try {
-            // Attempt to create the booking in Airtable
-            const createdBookingRecord = await createBooking(bookingDetails);
-
-            // If add-ons were selected, create records for them
-            if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
-                const allAvailableAddOns = await getAvailableAddOns(); // Fetch all add-ons to get their IDs
-                await createBookingAddons(createdBookingRecord.id, bookingDetails.selected_add_ons, allAvailableAddOns);
+        let outputContexts = [
+            {
+                name: `${session}/contexts/booking-flow`,
+                lifespanCount: 5,
+                parameters: bookingDetails // Always update booking-flow context
             }
+        ];
 
-            // Generate a final confirmation message
-            const { date, time } = formatDubai(bookingDetails.bookingUTC);
-            const venueName = bookingDetails.venue || "the selected venue";
-            const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
-            const totalPrice = bookingDetails.grand_total ? ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.` : '';
+        // Check if all required contact details are present
+        if (fullName && mobileNumber && emailAddress) {
+            try {
+                // Attempt to create the booking in Airtable
+                const createdBookingRecord = await createBooking(bookingDetails);
 
-            finalConfirmationPrompt = `Okay, ${fullName}! Your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary} is now confirmed!${totalPrice} A confirmation email will be sent to ${emailAddress}. Thank you!`;
+                // If add-ons were selected, create records for them
+                if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
+                    const allAvailableAddOns = await getAvailableAddOns(); // Fetch all add-ons to get their IDs
+                    await createBookingAddons(createdBookingRecord.id, bookingDetails.selected_add_ons, allAvailableAddOns);
+                }
 
-        } catch (error) {
-            console.error("❌ CollectContactDetails - Error finalizing booking:", error.message);
-            finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your booking. Please try again or contact us directly.";
+                // Generate a final confirmation message
+                const { date, time } = formatDubai(bookingDetails.bookingUTC);
+                const venueName = bookingDetails.venue || "the selected venue";
+                const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
+                const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
+                // Fixed the closing brace for totalPrice
+                const totalPrice = bookingDetails.grand_total ? ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.` : ''; 
+
+                finalConfirmationPrompt = `Okay, ${fullName}! Your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary} is now confirmed!${totalPrice} A confirmation email will be sent to ${emailAddress}. Thank you!`;
+
+                outputContexts.push({
+                    name: `${session}/contexts/booking-finalized`, // Indicate booking is complete
+                    lifespanCount: 1,
+                });
+                outputContexts.push({
+                    name: `${session}/contexts/booking-flow`, // Clear/reset booking-flow context
+                    lifespanCount: 0, 
+                });
+
+            } catch (error) {
+                console.error("❌ CollectContactDetails - Error finalizing booking:", error.message);
+                finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your booking. Please try again or contact us directly.";
+            }
+        } else {
+            // If not all contact details are present, prompt for them.
+            let missingFields = [];
+            if (!fullName) missingFields.push("full name");
+            if (!mobileNumber) missingFields.push("mobile number");
+            if (!emailAddress) missingFields.push("email address");
+
+            finalConfirmationPrompt = `I still need your ${missingFields.join(' and ')} to finalize the booking.`;
+
+            // Keep the awaiting-guest-details context active
+            outputContexts.push({
+                name: `${session}/contexts/awaiting-guest-details`,
+                lifespanCount: 2,
+                parameters: { // Pass back what was collected to maintain state
+                    person: fullName, 
+                    'phone-number': mobileNumber,
+                    email: emailAddress
+                }
+            });
         }
 
         return res.json({
             fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
-            outputContexts: [
-                {
-                    name: `${session}/contexts/booking-finalized`, // Indicate booking is complete
-                    lifespanCount: 1,
-                },
-                {
-                    name: `${session}/contexts/booking-flow`, // Clear/reset booking-flow context
-                    lifespanCount: 0, 
-                }
-            ]
+            outputContexts: outputContexts
         });
     }
 
