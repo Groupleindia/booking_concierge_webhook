@@ -722,7 +722,7 @@ app.post("/webhook", async (req, res) => {
     if (intent === "Get Package Details") { 
         console.log(`DEBUG: Entering Get Package Details Intent.`); 
         console.log(`DEBUG: Raw params for Get Package Details Intent: ${JSON.stringify(params, null, 2)}`); 
-        console.log(`DEBUG: Raw req.body.queryResult.parameters: ${JSON.body.queryResult.parameters, null, 2)}`); 
+        console.log(`DEBUG: Raw req.body.queryResult.parameters: ${JSON.stringify(req.body.queryResult.parameters, null, 2)}`); 
 
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
@@ -972,6 +972,9 @@ app.post("/webhook", async (req, res) => {
     // ✅ Collect Contact Details Intent
     if (intent === "CollectContactDetails") {
         console.log(`DEBUG: Entering CollectContactDetails Intent.`);
+        // Log the raw params object to see its structure
+        console.log(`DEBUG: Raw params in CollectContactDetails: ${JSON.stringify(params, null, 2)}`);
+
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx) {
             console.error("❌ CollectContactDetails - Booking flow context missing!");
@@ -985,9 +988,10 @@ app.post("/webhook", async (req, res) => {
         let emailAddress = bookingDetails.email_id || '';
 
         // Update with new parameters from the current turn
-        if (params.personName?.name) {
+        // Ensure we handle the personName object structure correctly
+        if (params.personName && typeof params.personName === 'object' && params.personName.name) {
             fullName = params.personName.name;
-        } else if (params.personName) { // Handle case where personName is directly a string, not an object
+        } else if (params.personName && typeof params.personName === 'string') { // Fallback for direct string
             fullName = params.personName;
         }
         if (params.phoneNumber) {
