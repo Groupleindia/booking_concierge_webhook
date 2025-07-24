@@ -970,7 +970,7 @@ app.post("/webhook", async (req, res) => {
         });
     }
 
-    // ✅ Collect Contact Details Intent (NEW BLOCK)
+    // ✅ Collect Contact Details Intent
     if (intent === "CollectContactDetails") {
         console.log(`DEBUG: Entering CollectContactDetails Intent.`);
         const bookingFlowCtx = findContext("booking-flow");
@@ -1003,39 +1003,34 @@ app.post("/webhook", async (req, res) => {
 
         // Check if all required contact details are present
         if (fullName && mobileNumber && emailAddress) {
-            try {
-                // Attempt to create the booking in Airtable
-                const createdBookingRecord = await createBooking(bookingDetails);
+            // Generate summary for confirmation
+            const { date, time } = formatDubai(bookingDetails.bookingUTC);
+            const venueName = bookingDetails.venue || "the selected venue";
+            const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
+            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
 
-                // If add-ons were selected, create records for them
-                if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
-                    const allAvailableAddOns = await getAvailableAddOns(); // Fetch all add-ons to get their IDs
-                    await createBookingAddons(createdBookingRecord.id, bookingDetails.selected_add_ons, allAvailableAddOns);
-                }
-
-                // Generate a final confirmation message
-                const { date, time } = formatDubai(bookingDetails.bookingUTC);
-                const venueName = bookingDetails.venue || "the selected venue";
-                const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-                const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
-                // Fixed the closing brace for totalPrice
-                const totalPrice = bookingDetails.grand_total ? ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.` : ''; 
-
-                finalConfirmationPrompt = `Okay, ${fullName}! Your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary} is now confirmed!${totalPrice} A confirmation email will be sent to ${emailAddress}. Thank you!`;
-
-                outputContexts.push({
-                    name: `${session}/contexts/booking-finalized`, // Indicate booking is complete
-                    lifespanCount: 1,
-                });
-                outputContexts.push({
-                    name: `${session}/contexts/booking-flow`, // Clear/reset booking-flow context
-                    lifespanCount: 0, 
-                });
-
-            } catch (error) {
-                console.error("❌ CollectContactDetails - Error finalizing booking:", error.message);
-                finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your booking. Please try again or contact us directly.";
+            let totalPrice = '';
+            if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
+                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
+            } else if (bookingDetails.type === 'table' && bookingDetails.grand_total > 0) {
+                // Only show total for table booking if there's an actual cost (e.g., cover charge)
+                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
             }
+
+            const summaryText = `your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary}${totalPrice}`;
+            finalConfirmationPrompt = `Alright, ${fullName}! So, just to confirm, ${summaryText}. Does that all sound correct?`;
+
+            outputContexts.push({
+                name: `${session}/contexts/awaiting-final-confirmation`, // New context to await final confirmation
+                lifespanCount: 2,
+                parameters: {
+                    // Pass collected contact details to this context as well, if needed for the final confirmation prompt
+                    full_name: fullName,
+                    mobile_number: mobileNumber,
+                    email_id: emailAddress
+                }
+            });
+
         } else {
             // If not all contact details are present, prompt for them.
             let missingFields = [];
@@ -1062,6 +1057,69 @@ app.post("/webhook", async (req, res) => {
             outputContexts: outputContexts
         });
     }
+
+    // ✅ Confirm Booking Intent (NEW BLOCK - triggered after summary presented)
+    if (intent === "Confirm Booking Intent") {
+        console.log(`DEBUG: Entering Confirm Booking Intent.`);
+        const bookingFlowCtx = findContext("booking-flow");
+        if (!bookingFlowCtx) {
+            console.error("❌ Confirm Booking Intent - Booking flow context missing!");
+            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your booking details. Please start over.") });
+        }
+
+        const bookingDetails = bookingFlowCtx.parameters;
+
+        let finalConfirmationPrompt;
+        try {
+            // Attempt to create the booking in Airtable
+            const createdBookingRecord = await createBooking(bookingDetails);
+
+            // If add-ons were selected, create records for them
+            if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
+                const allAvailableAddOns = await getAvailableAddOns(); // Fetch all add-ons to get their IDs
+                await createBookingAddons(createdBookingRecord.id, bookingDetails.selected_add_ons, allAvailableAddOns);
+            }
+
+            // Generate a final confirmation message
+            const { date, time } = formatDubai(bookingDetails.bookingUTC);
+            const venueName = bookingDetails.venue || "the selected venue";
+            const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
+            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
+
+            let totalPrice = '';
+            if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
+                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
+            } else if (bookingDetails.type === 'table' && bookingDetails.grand_total > 0) {
+                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
+            }
+
+            // Use the full name from bookingDetails
+            finalConfirmationPrompt = `Excellent, ${bookingDetails.full_name}! Your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary} is now confirmed!${totalPrice} A confirmation email will be sent to ${bookingDetails.email_id}. Thank you!`;
+
+        } catch (error) {
+            console.error("❌ Confirm Booking Intent - Error finalizing booking:", error.message);
+            finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your booking. Please try again or contact us directly.";
+        }
+
+        return res.json({
+            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-finalized`, // Indicate booking is complete
+                    lifespanCount: 1,
+                },
+                {
+                    name: `${session}/contexts/booking-flow`, // Clear/reset booking-flow context
+                    lifespanCount: 0, 
+                },
+                {
+                    name: `${session}/contexts/awaiting-final-confirmation`, // Clear this context
+                    lifespanCount: 0, 
+                }
+            ]
+        });
+    }
+
 
     // Default fallback for unhandled intents (This must be the last return in the try block)
     return res.json({
