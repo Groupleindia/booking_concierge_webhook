@@ -1,1094 +1,659 @@
-// index.js - Replit Webhook for AI Booking Concierge
+const express = require('express');
+const axios = require('axios');
+const { google } = require('googleapis'); // For future OAuth if needed
+const Airtable = require('airtable');
+const moment = require('moment-timezone'); // For date/time handling
+const nodemailer = require('nodemailer'); // NEW: For sending emails
+require('dotenv').config(); // Load environment variables
 
-const express = require("express");
-const axios = require("axios");
-const dotenv = require("dotenv");
-const moment = require("moment-timezone");
-// const fetch = require("node-fetch"); // Used for Gemini API calls - OLD LINE
-let fetch; // Declare fetch here, it will be assigned dynamically
-
-// Use an immediately invoked async function to import node-fetch
-// This is a workaround for ERR_REQUIRE_ESM when using require() in a CommonJS context
-// with a module that is ESM-only.
-(async () => {
-    fetch = (await import('node-fetch')).default;
-})();
-
-
-dotenv.config(); // Load environment variables from .env file
 const app = express();
-const port = process.env.PORT || 3000;
-
 app.use(express.json()); // Middleware to parse JSON request bodies
 
-// --- Environment Variables ---
-// IMPORTANT: Ensure these are set in your .env file on Glitch based on your Airtable setup:
-// BASE_ID=YOUR_AIRTABLE_BASE_ID (e.g., appXXXXXXXXXXXXXX)
-// AIRTABLE_TOKEN=YOUR_AIRTABLE_API_KEY (e.g., patXXXXXXXXXXXXXX)
-// AIRTABLE_VENUES_TABLE_ID=YOUR_VENTABLE_ID (e.g., tblXXXXXXXXXXXXXX - from your "Venues" table)
-// AIRTABLE_PACKAGES_TABLE_ID=YOUR_PACKAGES_TABLE_ID (e.g., tblYYYYYYYYYYYYYY - from your "Packages" table)
-// AIRTABLE_ADDONS_TABLE_ID=YOUR_ADDONS_TABLE_ID (e.g., tblZZZZZZZZZZZZZZ - from your "Add-Ons" table)
-// AIRTABLE_BOOKINGS_TABLE_ID=YOUR_BOOKINGS_TABLE_ID (e.g., tblAAAAAAAAAAAAAA - from your "Bookings" table)
-// AIRTABLE_BOOKING_ADDONS_TABLE_ID=YOUR_BOOKING_ADDONS_TABLE_ID (e.g., tblBBBBBBBBBBBBBB - from your "Booking_Addons" table)
-// GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+// --- Airtable Configuration ---
+Airtable.configure({
+    apiKey: process.env.AIRTABLE_API_KEY,
+});
+const base = Airtable.base(process.env.AIRTABLE_BASE_ID);
 
-// 🔹 Fetch venues from Airtable
+// --- Helper Functions ---
+
 /**
- * Fetches available venues from Airtable based on guest count.
- * @param {number} guestCount - The number of guests for the booking.
- * @returns {Promise<Array<object>>} - An array of available venue objects.
+ * Finds a specific context from Dialogflow's webhook request.
+ * @param {string} contextName The display name of the context (e.g., "booking-flow").
+ * @param {Array} contexts The array of contexts from the Dialogflow request.
+ * @returns {object|null} The found context object, or null if not found.
  */
-async function getAvailableVenues(guestCount) {
-  const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_VENUES_TABLE_ID}`;
-  const cfg = {
-    headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
-  };
-  try {
-    const resp = await axios.get(url, cfg);
-    return resp.data.records
-      .filter((r) => guestCount ? r.fields.standing_capacity >= guestCount : true) // Filter only if guestCount is provided
-      .map((r) => ({
-        id: r.id, // Include venue ID
-        name: r.fields.space_name,
-        description: r.fields.description || "",
-        standing_capacity: r.fields.standing_capacity || 0,
-        seated_capacity: r.fields.seated_capacity || 0,
-      }))
-      .filter((v) => v.name); // Ensure venue name exists
-  } catch (error) {
-    console.error("❌ Error fetching venues from Airtable:", error.message);
-    return []; // Return empty array on error
-  }
+function findContext(contextName, contexts) {
+    if (!contexts) {
+        console.log(`DEBUG: No contexts provided to findContext.`);
+        return null;
+    }
+    const fullContextName = `${process.env.DIALOGFLOW_PROJECT_ID}/agent/sessions/${process.env.DIALOGFLOW_SESSION_ID}/contexts/${contextName}`;
+    const found = contexts.find(context => context.name === fullContextName || context.name.endsWith(`/contexts/${contextName}`));
+    console.log(`DEBUG: Searching for context "${contextName}". Found:`, found ? "Yes" : "No");
+    return found;
 }
 
-// 🔹 Fetch available packages from Airtable
 /**
- * Fetches available packages and their details from Airtable.
- * @returns {Promise<Array<object>>} - An array of package objects with name, price, etc.
+ * Extracts a parameter from Dialogflow, checking multiple sources.
+ * @param {object} dialogflowRequest The Dialogflow webhook request.
+ * @param {string} paramName The name of the parameter to extract.
+ * @returns {any} The parameter value, or undefined if not found.
+ */
+function getParameter(dialogflowRequest, paramName) {
+    const queryResult = dialogflowRequest.queryResult;
+    // Check parameters from the current intent
+    if (queryResult.parameters && queryResult.parameters[paramName]) {
+        console.log(`DEBUG: Parameter '${paramName}' found in current intent parameters.`);
+        return queryResult.parameters[paramName];
+    }
+    // Check parameters from input contexts
+    if (queryResult.outputContexts) {
+        for (const context of queryResult.outputContexts) {
+            if (context.parameters && context.parameters[paramName]) {
+                console.log(`DEBUG: Parameter '${paramName}' found in output context: ${context.name}.`);
+                return context.parameters[paramName];
+            }
+        }
+    }
+    console.log(`DEBUG: Parameter '${paramName}' not found.`);
+    return undefined;
+}
+
+/**
+ * Fetches all available venues from Airtable.
+ * @returns {Array} An array of venue objects.
+ */
+async function getAvailableVenues() {
+    console.log("Fetching available venues...");
+    const venues = [];
+    await base('Venues').select({
+        view: "Grid view" // Ensure this view exists and is accessible
+    }).eachPage((records, fetchNextPage) => {
+        records.forEach(record => {
+            venues.push({
+                id: record.id,
+                name: record.get('Name'),
+                description: record.get('Description')
+            });
+        });
+        fetchNextPage();
+    });
+    console.log(`Found ${venues.length} venues.`);
+    return venues;
+}
+
+/**
+ * Fetches all available packages from Airtable. (Still present but not used in group flow)
+ * @returns {Array} An array of package objects.
  */
 async function getAvailablePackages() {
-  const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_PACKAGES_TABLE_ID}`;
-  const cfg = {
-    headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
-  };
-  try {
-    const resp = await axios.get(url, cfg);
-    return resp.data.records
-      .map((r) => ({
-        id: r.id, // Store Airtable record ID for linking
-        name: r.fields.package_name,
-        price: r.fields.price || 0,
-        price_type: r.fields.price_type,
-        min_guests: r.fields.min_guests || 0,
-        inclusions: r.fields.inclusions || "",
-        category: r.fields.category || "General" // Corrected from A_category to category
-      }))
-      .filter((p) => p.name); // Ensure package name exists
-  } catch (error) {
-    console.error("❌ Error fetching packages from Airtable:", error.message);
-    return []; // Return empty array on error
-  }
+    console.log("Fetching available packages...");
+    const packages = [];
+    await base('Packages').select({
+        view: "Grid view"
+    }).eachPage((records, fetchNextPage) => {
+        records.forEach(record => {
+            packages.push({
+                id: record.id,
+                name: record.get('Name'),
+                price: record.get('Price') || 0 // Ensure price is a number
+            });
+        });
+        fetchNextPage();
+    });
+    console.log(`Found ${packages.length} packages.`);
+    return packages;
 }
 
-// 🔹 Fetch available add-ons from Airtable
 /**
- * Fetches available add-ons and their prices from Airtable.
- * @returns {Promise<Array<object>>} - An array of add-on objects with name and price.
+ * Fetches all available add-ons from Airtable. (Still present but not used in group flow)
+ * @returns {Array} An array of add-on objects.
  */
 async function getAvailableAddOns() {
-  const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_ADDONS_TABLE_ID}`;
-  const cfg = {
-    headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
-  };
-  try {
-    const resp = await axios.get(url, cfg);
-    return resp.data.records
-      .map((r) => ({
-        id: r.id, // Store Airtable record ID for linking
-        name: r.fields.add_on_name, // Corrected field name based on screenshot
-        price: r.fields.price || 0,
-        price_type: r.fields.price_type,
-        category: r.fields.category
-      }))
-      .filter((a) => a.name); // Ensure add-on name exists
-  } catch (error) {
-    console.error("❌ Error fetching add-ons from Airtable:", error.message);
-    return []; // Return empty array on error
-  }
+    console.log("Fetching available add-ons...");
+    const addOns = [];
+    await base('Add-Ons').select({
+        view: "Grid view"
+    }).eachPage((records, fetchNextPage) => {
+        records.forEach(record => {
+            addOns.push({
+                id: record.id,
+                name: record.get('Name'),
+                price: record.get('Price') || 0 // Ensure price is a number
+            });
+        });
+        fetchNextPage();
+    });
+    console.log(`Found ${addOns.length} add-ons.`);
+    return addOns;
 }
 
-
-// 🔹 Format UTC time into Dubai time
 /**
- * Formats a UTC ISO string into Dubai date and time.
- * @param {string} utcIso - The UTC ISO date string.
- * @returns {object} - An object with formatted date and time for Dubai.
+ * Creates a new booking record in Airtable. (MODIFIED: Now handles both Table and Group Leads)
+ * @param {object} bookingDetails Details from the booking-flow context.
+ * @param {string} status The status to set for the booking (e.g., 'Confirmed', 'New Lead').
+ * @returns {object} The created Airtable record.
  */
-function formatDubai(utcIso) {
-  const m = moment.utc(utcIso).tz("Asia/Dubai");
-  return {
-    date: m.format("dddd, D MMMM"), // e.g., "Wednesday, 2 July"
-    time: m.format("h:mm A"), // e.g., "9:30 PM"
-    local_datetime: m.format("YYYY-MM-DD HH:mm:ss") // e.g., "2025-07-05 19:00:00"
-  };
-}
+async function createBooking(bookingDetails, status) {
+    console.log("Attempting to create booking with details:", JSON.stringify(bookingDetails, null, 2));
 
-// 🔹 Convert booking date/time to UTC from Dubai
-/**
- * Builds a UTC ISO string from a Dubai date and time.
- * @param {string} date - The date string (YYYY-MM-DD).
- * @param {string} time - The time string (e.g., "7:00 PM", "19:00").
- * @returns {string} - The UTC ISO date string.
- */
-function buildDubaiUTC(date, time) {
-  // Handles both 12-hour (h:mm A) and 24-hour (HH:mm) formats
-  return moment.tz(`${date} ${time}`, ["YYYY-MM-DD h:mm A", "YYYY-MM-DD HH:mm"], "Asia/Dubai").toISOString();
-}
+    const fields = {
+        'Booking Type': bookingDetails.type,
+        'Full Name': bookingDetails.full_name,
+        'Email': bookingDetails.email_id,
+        'Phone Number': bookingDetails.phone_number,
+        'Guest Count': bookingDetails.guestCount,
+        'Booking Date': bookingDetails.bookingDate,
+        'Booking Time': bookingDetails.bookingTime,
+        'Venue': bookingDetails.venue_id ? [bookingDetails.venue_id] : null, // Link to Venue record
+        'Status': status // Set status based on booking type
+    };
 
-// 🔹 Gemini-powered AI response generator
-/**
- * Calls the Gemini API to generate natural language responses.
- * Adds a specific tone instruction to the prompt.
- * @param {string} prompt - The prompt to send to the Gemini API.
- * @returns {Promise<string>} - The generated text response.
- */
-async function generateGeminiReply(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-
-  const payload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: prompt +
-              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise.',
-          },
-        ],
-      },
-    ],
-  };
-
-  try {
-    // Ensure fetch is available before calling
-    if (!fetch) {
-        console.error("❌ fetch is not initialized. Waiting for dynamic import.");
-        // You might want to add a small delay or a more robust check here
-        // if this block is hit before the import completes.
-        // For most cases, the top-level await import will ensure it's ready.
-        return "There was a technical issue. Please try again shortly.";
+    // Only add package/add-on/grand total fields if they are relevant (i.e., for confirmed table bookings)
+    // For group leads, these will be null/undefined as they are not collected by the bot.
+    if (bookingDetails.type === 'table') {
+        // These fields are typically for confirmed bookings with pricing
+        if (bookingDetails.packages && bookingDetails.packages.length > 0) {
+            fields.package_name = Array.isArray(bookingDetails.packages) ? bookingDetails.packages.join(', ') : bookingDetails.packages;
+        }
+        if (bookingDetails.package_ids && bookingDetails.package_ids.length > 0) {
+            fields.package_id = bookingDetails.package_ids;
+        }
+        if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
+            fields.selected_add_ons = Array.isArray(bookingDetails.selected_add_ons) ? bookingDetails.selected_add_ons.join(', ') : bookingDetails.selected_add_ons;
+        }
+        fields['Grand Total'] = bookingDetails.grand_total || 0;
+    } else if (bookingDetails.type === 'group') {
+        // Explicitly set these to null for group leads to ensure they are empty in Airtable
+        fields.package_name = null;
+        fields.package_id = null;
+        fields.selected_add_ons = null;
+        fields['Grand Total'] = null;
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+    console.log("Fields for new booking record:", JSON.stringify(fields, null, 2));
+
+    try {
+        // IMPORTANT: Ensure your 'Bookings' table has all these columns,
+        // even if some will be null for group leads.
+        const record = await base('Bookings').create(fields, { typecast: true });
+        console.log("Successfully created booking record:", record.id);
+        return record;
+    } catch (error) {
+        console.error("Error creating booking record:", error.message, error.stack);
+        throw new Error(`Failed to create booking: ${error.message}`);
+    }
+}
+
+/**
+ * Creates records in the Booking_Addons table to link add-ons to a booking. (Still present but not used in new group flow)
+ * @param {string} bookingRecordId The ID of the newly created booking record.
+ * @param {Array<string>} selectedAddOnNames An array of names of selected add-ons.
+ * @param {Array<object>} allAvailableAddOns All add-on objects from Airtable (name and id).
+ */
+async function createBookingAddons(bookingRecordId, selectedAddOnNames, allAvailableAddOns) {
+    console.log(`Creating add-on links for booking ID: ${bookingRecordId}`);
+    const recordsToCreate = [];
+
+    selectedAddOnNames.forEach(addOnName => {
+        const addOn = allAvailableAddOns.find(a => a.name === addOnName);
+        if (addOn) {
+            recordsToCreate.push({
+                fields: {
+                    'Booking': [bookingRecordId], // Link to the main Booking record
+                    'Add-On': [addOn.id],        // Link to the Add-On record
+                    'Quantity': 1                 // Assuming 1 quantity per selected add-on for simplicity
+                }
+            });
+        } else {
+            console.warn(`Warning: Could not find Add-On ID for name: ${addOnName}`);
+        }
     });
 
-    const data = await response.json();
-
-    console.log("🟡 Gemini Request Prompt:", prompt);
-    console.log("🟢 Gemini Raw Response:", JSON.stringify(data, null, 2));
-
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!reply) {
-      console.error("🔴 Gemini response missing expected structure.");
-      return "Sorry, I didn’t get a proper response. Can I help you another way?";
-    }
-
-    return reply;
-  } catch (error) {
-    console.error("❌ Gemini API Error:", error.response ? error.response.data : error.message);
-    return "There was a technical issue getting the information. Please try again shortly.";
-  }
-}
-
-// 🔹 Create a new booking record in the "Bookings" table
-/**
- * Creates a new booking record in the main "Bookings" Airtable table.
- * @param {object} bookingDetails - Object containing all booking and customer details.
- * @returns {Promise<object>} - The created record from Airtable.
- */
-async function createBooking(bookingDetails) {
-  try {
-    const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_BOOKINGS_TABLE_ID}`;
-    const cfg = {
-      headers: {
-        Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    };
-
-    const now = moment();
-    const formattedCreatedDate = now.format("M/D/YYYY h:mma"); // e.g., "6/25/2025 3:45pm"
-    const storageTimeUtc = now.toISOString(); // ISO string for UTC storage time
-
-    const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventTimeLocal } = formatDubai(bookingDetails.bookingUTC);
-    const eventDateTime = `${formattedBookingDate} ${formattedBookingTime}`; // e.g., "5 July 2025 8:30pm"
-
-    // Prepare fields based on booking type
-    const fields = {
-      created_date: formattedCreatedDate,
-      guest_name: bookingDetails.full_name,
-      phone_no: bookingDetails.mobile_number,
-      email: bookingDetails.email_id,
-      booking_type: bookingDetails.type === 'table' ? 'Table Booking' : 'Group Booking', // Map 'type' to 'booking_type'
-      event_date_time: eventDateTime, // Combined date and time string
-      guest_count: bookingDetails.guest_count,
-      status: 'Confirmed', // Default status
-      event_time_local: eventTimeLocal, // Local Dubai time
-      storage_time_utc: storageTimeUtc, // UTC time of storage
-    };
-
-    // Add venue details
-    if (bookingDetails.venue) {
-      fields.space_name = bookingDetails.venue; // Matches CSV 'space_name'
-      if (bookingDetails.space_id) {
-        fields.space_id = [bookingDetails.space_id]; // Ensure this is an array for linked records
-      }
-    }
-
-    // Add group booking specific details
-    if (bookingDetails.type === 'group') {
-      // Store packages as a comma-separated string if multiple are selected
-      fields.package_name = Array.isArray(bookingDetails.packages) ? bookingDetails.packages.join(', ') : bookingDetails.packages;
-      // Store package IDs as an array of linked record IDs
-      if (bookingDetails.package_ids && bookingDetails.package_ids.length > 0) {
-        fields.package_id = bookingDetails.package_ids; // Assuming this is a Linked Record field in Airtable
-      }
-      fields.grand_total = `AED${bookingDetails.grand_total.toFixed(2)}`; // Format total price as "AEDX.XX"
-      // total_package_cost and proposal_summary still need to be addressed if distinct from grand_total and generated summary
-    }
-
-    const data = { records: [{ fields }] };
-    const response = await axios.post(url, data, cfg);
-    console.log('Booking successful:', response.data.records[0].id);
-    return response.data.records[0]; // Return the created record
-  } catch (error) {
-    console.error('Error creating booking:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to create booking.');
-  }
-}
-
-// 🔹 Create records in the "Booking_Addons" table for selected add-ons
-/**
- * Creates records in the "Booking_Addons" table for each selected add-on,
- * linking them to the main booking record.
- * @param {string} bookingRecordId - The Airtable record ID of the main booking.
- * @param {Array<string>} selectedAddOnNames - An array of names of selected add-ons.
- * @param {Array<object>} availableAddOns - The list of all available add-ons with their details.
- * @returns {Promise<void>}
- */
-async function createBookingAddons(bookingRecordId, selectedAddOnNames, availableAddOns) {
-  if (!selectedAddOnNames || selectedAddOnNames.length === 0) {
-    return; // No add-ons to record
-  }
-
-  const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_BOOKING_ADDONS_TABLE_ID}`;
-  const cfg = {
-    headers: {
-      Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}`,
-      'Content-Type': 'application/json'
-    }
-  };
-
-  const recordsToCreate = [];
-  selectedAddOnNames.forEach(addOnName => {
-    const addOnDetail = availableAddOns.find(ao => ao.name.toLowerCase() === addOnName.toLowerCase());
-    if (addOnDetail) {
-      recordsToCreate.push({
-        fields: {
-          booking_id: [bookingRecordId], // Link to the main booking record
-          add_on_id: [addOnDetail.id], // Link to the Add-Ons record
-          quantity: 1, // Assuming quantity is 1 for now, adjust if user can specify
-          price: addOnDetail.price,
-          total_price: addOnDetail.price, // For single quantity, total price is item price
-          active: true // Or whatever default status you need
+    if (recordsToCreate.length > 0) {
+        try {
+            const createdRecords = await base('Booking_Addons').create(recordsToCreate, { typecast: true });
+            console.log(`Successfully created ${createdRecords.length} Booking_Addon records.`);
+        } catch (error) {
+            console.error("Error creating Booking_Addon records:", error.message, error.stack);
+            throw new Error(`Failed to link add-ons to booking: ${error.message}`);
         }
-      });
     } else {
-      console.warn(`Selected add-on "${addOnName}" not found in available add-ons. Skipping.`);
+        console.log("No Booking_Addon records to create.");
     }
-  });
+}
 
-  if (recordsToCreate.length > 0) {
+/**
+ * Sends an email with a link to the PDF packages.
+ * @param {string} toEmail The recipient's email address.
+ * @param {string} customerName The customer's full name.
+ * @returns {Promise<boolean>} True if email sent successfully, false otherwise.
+ */
+async function sendEmailWithPdf(toEmail, customerName) {
+    // Configure your email transporter (e.g., Zoho Mail, Gmail, custom SMTP)
+    let transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_SERVICE_HOST, // e.g., smtp.zoho.com
+        port: parseInt(process.env.EMAIL_SERVICE_PORT), // e.g., 587
+        secure: false, // Use 'true' for port 465 (SSL), 'false' for 587 (TLS)
+        auth: {
+            user: process.env.EMAIL_SERVICE_USER,
+            pass: process.env.EMAIL_SERVICE_PASS
+        },
+        tls: {
+            // WARNING: Do not fail on invalid certs - useful for testing, but remove in production if possible
+            // if you encounter CERT_HAS_EXPIRED or similar errors, you might need this.
+            // For production, ensure proper certificates or remove if not needed.
+            rejectUnauthorized: false
+        }
+    });
+
+    const pdfUrl = process.env.PDF_URL; // URL to your hosted PDF
+
+    let mailOptions = {
+        from: process.env.EMAIL_SERVICE_USER,
+        to: toEmail,
+        subject: 'Your Group Booking Package Details - [Your Company Name]',
+        html: `
+            <p>Dear ${customerName},</p>
+            <p>Thank you for your interest in a group booking with us! We've received your inquiry details.</p>
+            <p>Here is a link to our detailed package options for your perusal:</p>
+            <p><a href="${pdfUrl}">View Our Group Booking Packages (PDF)</a></p>
+            <p>Our manager will review your inquiry and get in touch with you shortly to assist with your package selection and finalize the details for your event.</p>
+            <p>We look forward to helping you plan a fantastic event!</p>
+            <p>Best regards,</p>
+            <p>The [Your Company Name] Team</p>
+        `
+    };
+
     try {
-      await axios.post(url, { records: recordsToCreate }, cfg);
-      console.log(`Successfully recorded ${recordsToCreate.length} add-on(s) for booking ${bookingRecordId}.`);
+        let info = await transporter.sendMail(mailOptions);
+        console.log('Email sent: ' + info.response);
+        return true;
     } catch (error) {
-      console.error('Error creating booking add-ons:', error.response ? error.response.data : error.message);
-      throw new Error('Failed to create booking add-ons.');
+        console.error('Error sending email:', error);
+        return false;
     }
-  }
 }
 
 
-// 🔹 Dialogflow Webhook Endpoint
-app.post("/webhook", async (req, res) => {
-  const intent = req.body.queryResult.intent.displayName;
-  const session = req.body.session;
-  const params = req.body.queryResult.parameters;
-  const contexts = req.body.queryResult.outputContexts || [];
+/**
+ * Placeholder for Gemini API call. Replace with actual API integration.
+ * For now, it just returns the input text.
+ * @param {string} text The text to send to Gemini.
+ * @returns {Promise<string>} The response from Gemini.
+ */
+async function generateGeminiReply(text) {
+    // In a real scenario, you would integrate with the Gemini API here.
+    // Example using axios (replace with actual API endpoint and key)
+    /*
+    try {
+        const response = await axios.post('YOUR_GEMINI_API_ENDPOINT', {
+            prompt: text,
+            // other Gemini parameters
+        }, {
+            headers: {
+                'Authorization': `Bearer YOUR_GEMINI_API_KEY`,
+                'Content-Type': 'application/json'
+            }
+        });
+        return response.data.generatedText; // Or whatever your Gemini response structure is
+    } catch (error) {
+        console.error("Error calling Gemini API:", error);
+        return text; // Fallback to original text if API call fails
+    }
+    */
+    return text; // For now, just return the input text
+}
 
-  // Helper to find a context by its display name
-  const findContext = (contextName) => {
-    return contexts.find((c) => c.name.endsWith(`/contexts/${contextName}`));
-  };
+// --- Webhook Endpoint ---
+app.post('/webhook', async (req, res) => {
+    const dialogflowRequest = req.body;
+    const intent = dialogflowRequest.queryResult.intent ? dialogflowRequest.queryResult.intent.displayName : 'Default Fallback Intent';
+    const session = dialogflowRequest.session;
+    const inputContexts = dialogflowRequest.queryResult.outputContexts; // Correctly capture outputContexts from queryResult
 
-  // Log the exact intent string and its length for debugging
-  console.log(`DEBUG: Webhook received intent (exact): "${intent}" (length: ${intent.length})`);
+    console.log(`\n--- Webhook Request ---`);
+    console.log(`Intent: ${intent}`);
+    console.log(`Session: ${session}`);
+    // console.log(`Full Request:`, JSON.stringify(dialogflowRequest, null, 2)); // Uncomment for full request debugging
 
-  try { // START OF MAIN TRY BLOCK FOR WEBHOOK
-    // ✅ Booking Intent - Initial booking request
-    if (intent === "Booking Intent") {
-      let guestCount = Array.isArray(params.guestCount)
-        ? params.guestCount[0]
-        : params.guestCount;
+    // --- Intent Handlers ---
 
-      // Extract only the date part (YYYY-MM-DD) from bookingdate parameter
-      const rawBookingDate = Array.isArray(params.bookingdate) ? params.bookingdate[0] : params.bookingdate;
-      const bookingDateOnly = moment(rawBookingDate).format("YYYY-MM-DD");
-
-      // Handle bookingtime which might be an array (as seen in the curl output)
-      let rawBookingTime;
-      if (Array.isArray(params.bookingtime)) {
-        // If multiple times, try to pick the last one as it's usually the most relevant
-        rawBookingTime = params.bookingtime[params.bookingtime.length - 1];
-      } else {
-        rawBookingTime = params.bookingtime;
-      }
-
-      console.log(`DEBUG: rawBookingDate (from Dialogflow): ${rawBookingDate}`);
-      console.log(`DEBUG: bookingDateOnly (formatted): ${bookingDateOnly}`);
-      console.log(`DEBUG: rawBookingTime (from Dialogflow parameter): ${rawBookingTime}`);
-      console.log(`DEBUG: params.bookingtime.original: ${JSON.stringify(params.bookingtime.original)}`);
-
-      let bookingTimeStr;
-      // Extract the HH:mm part from the raw Dialogflow timestamp string directly.
-      // This assumes the HH:mm part of the incoming timestamp is the intended time in Dubai.
-      // Example: "2025-07-03T21:30:00+05:30" -> "21:30"
-      const timeStartIndex = rawBookingTime.indexOf('T') + 1;
-      const timeEndIndex = rawBookingTime.indexOf('+');
-      if (timeStartIndex !== -1 && timeEndIndex !== -1 && timeEndIndex > timeStartIndex) {
-          bookingTimeStr = rawBookingTime.substring(timeStartIndex, timeEndIndex).substring(0, 5); // Get "HH:mm"
-      } else {
-          // Fallback if parsing fails or unexpected format, though it should ideally not happen
-          bookingTimeStr = moment(rawBookingTime).format("HH:mm");
-          console.warn(`WARN: Fallback time parsing used for rawBookingTime: ${rawBookingTime}`);
-      }
-
-      console.log(`DEBUG: bookingTimeStr (extracted for buildDubaiUTC): ${bookingTimeStr}`);
-
-      // Now combine the correct date and time to build the UTC timestamp
-      // buildDubaiUTC will now take "2025-07-28" and "17:00" and interpret it as 5 PM Dubai.
-      const bookingUTC = buildDubaiUTC(bookingDateOnly, bookingTimeStr);
-      const { date, time } = formatDubai(bookingUTC); // This will format it back to readable Dubai time
-
-      console.log(`DEBUG: Final booking date (formatted): ${date}`);
-      console.log(`DEBUG: Final booking time (formatted): ${time}`);
-      console.log(`DEBUG: Final bookingUTC (stored in context): ${bookingUTC}`);
-
-      const category =
-        guestCount <= 10 ? "a general reservation" : "a group booking";
-      const venues = await getAvailableVenues(guestCount);
-
-      const prompt = venues.length
-        ? `A user requested ${category} for ${guestCount} guests on ${date} at ${time}. Available venues: ${venues
-            .map((v) => v.name)
-            .join(", ")}. Write a short, helpful spoken-style response suitable for a phone booking. Mention the venue options clearly and ask the user if any of those work for them.`
-        : `No venues available for ${guestCount} guests on ${date} at ${time}. Kindly offer an apology in a friendly, spoken tone.`;
-
-      const reply = await generateGeminiReply(prompt);
-
-      console.log("DEBUG: About to send response for Booking Intent."); // NEW LOG HERE
-
-      return res.json({
-        fulfillmentText: reply,
-        outputContexts: [
-          {
-            name: `${session}/contexts/booking-flow`,
-            lifespanCount: 5,
-            parameters: { guestCount, bookingUTC, type: category === "a general reservation" ? "table" : "group" }, // Store booking type
-          },
-        ],
-      });
+    // ✅ Welcome Intent
+    if (intent === "Welcome Intent") {
+        console.log("DEBUG: Entering Welcome Intent.");
+        const venues = await getAvailableVenues();
+        const venueNames = venues.map(v => v.name).join(', ');
+        return res.json({
+            fulfillmentText: `Hello! Welcome to our booking service. We offer bookings for ${venueNames}. Are you looking to book a table or a group event with packages?`,
+            outputContexts: [{
+                name: `${session}/contexts/awaiting-booking-type`,
+                lifespanCount: 5
+            }]
+        });
     }
 
-    // ✅ Modify Booking Intent
-    if (intent === "ModifyBookingIntent") {
-      const bookingFlowCtx = findContext("booking-flow");
-      let { guestCount, bookingUTC, type } = bookingFlowCtx?.parameters || {};
+    // ✅ Select Booking Type Intent
+    if (intent === "Select Booking Type Intent") {
+        console.log("DEBUG: Entering Select Booking Type Intent.");
+        const bookingType = getParameter(dialogflowRequest, 'booking_type');
+        let fulfillmentText = ``;
+        let outputContexts = [];
 
-      // Parse current bookingUTC to get its date and time components in Dubai time
-      let currentDubaiMoment = moment.utc(bookingUTC).tz("Asia/Dubai");
-      let currentDubaiDate = currentDubaiMoment.format("YYYY-MM-DD");
-      let currentDubaiTime = currentDubaiMoment.format("HH:mm"); // Use 24-hour for internal consistency
-
-      let { newGuestCount, newDate, newTime } = params;
-
-      console.log(`DEBUG (Modify): Initial guestCount: ${guestCount}, bookingUTC: ${bookingUTC}`);
-      console.log(`DEBUG (Modify): newGuestCount: ${newGuestCount}, newDate: ${newDate}, newTime: ${newTime}`);
-      console.log(`DEBUG (Modify): params.newTime.original: ${JSON.stringify(params.newTime?.original)}`);
-
-
-      if (!newGuestCount && !newDate && !newTime) {
-        return res.json({
-          fulfillmentText:
-            "What would you like to change — guest count, date, or time?",
-          outputContexts: [
-            {
-              name: `${session}/contexts/awaiting-modify-slot`,
-              lifespanCount: 1,
-            },
-            {
-              name: `${session}/contexts/booking-flow`,
-              lifespanCount: 5,
-              parameters: { guestCount, bookingUTC, type },
-            },
-          ],
+        outputContexts.push({
+            name: `${session}/contexts/booking-flow`,
+            lifespanCount: 5,
+            parameters: { type: bookingType }
         });
-      }
 
-      if (newGuestCount) guestCount = newGuestCount;
-      if (newDate) {
-        currentDubaiDate = moment(newDate).format("YYYY-MM-DD"); // Use the new date
-      }
-      if (newTime) {
-        // Extract the HH:mm part from the Dialogflow timestamp.
-        const timeStartIndex = newTime.indexOf('T') + 1;
-        const timeEndIndex = newTime.indexOf('+');
-        if (timeStartIndex !== -1 && timeEndIndex !== -1 && timeEndIndex > timeStartIndex) {
-            currentDubaiTime = newTime.substring(timeStartIndex, timeEndIndex).substring(0, 5); // Get "HH:mm"
+        if (bookingType === 'table') {
+            fulfillmentText = await generateGeminiReply("Great! For a table booking, how many guests will there be?");
+            outputContexts.push({
+                name: `${session}/contexts/awaiting-guest-count`,
+                lifespanCount: 2
+            });
+        } else if (bookingType === 'group') {
+            // MODIFIED: For group, directly ask for guest count, skip package selection
+            fulfillmentText = await generateGeminiReply(`Alright, for a group event, I'll need a few details to get started. How many guests will there be?`);
+            outputContexts.push({
+                name: `${session}/contexts/awaiting-guest-count`, // Direct to guest count
+                lifespanCount: 2
+            });
         } else {
-            currentDubaiTime = moment(newTime).format("HH:mm");
-            console.warn(`WARN: Fallback time parsing used for newTime: ${newTime}`);
+            fulfillmentText = await generateGeminiReply("I'm sorry, I didn't understand the booking type. Please choose 'table' or 'group'.");
         }
-        console.log(`DEBUG (Modify): currentDubaiTime (extracted for buildDubaiUTC): ${currentDubaiTime}`);
-      }
 
-      // Rebuild bookingUTC with potentially updated date/time
-      bookingUTC = buildDubaiUTC(currentDubaiDate, currentDubaiTime);
-
-      const { date, time } = formatDubai(bookingUTC);
-      const venues = await getAvailableVenues(guestCount);
-
-      const prompt = venues.length
-        ? `The user updated the booking to ${guestCount} guests on ${date} at ${time}. Available venues: ${venues
-            .map((v) => v.name)
-            .join(", ")}. Respond in a clear, conversational tone.`
-        : `After the change, no suitable venues found. Kindly inform the user in a warm, helpful voice.`;
-
-      const reply = await generateGeminiReply(prompt);
-
-      return res.json({
-        fulfillmentText: reply,
-        outputContexts: [
-          {
-            name: `${session}/contexts/booking-flow`,
-            lifespanCount: 5,
-            parameters: { guestCount, bookingUTC, type },
-          },
-        ],
-      });
+        return res.json({ fulfillmentText, outputContexts });
     }
 
-    // ✅ Ask Venue Details Intent
-    if (intent === "Ask Venue Details Intent") { // Corrected intent name with spaces
-      console.log(`DEBUG: Entering AskVenueDetailsIntent`);
-      let venueRaw;
-      if (Array.isArray(params.venue_name)) {
-          venueRaw = params.venue_name[params.venue_name.length - 1];
-      } else {
-          venueRaw = params.venue_name;
-      }
-      // Fallback for venueName if venue_name is not present or not an array
-      venueRaw = venueRaw || params.venueName;
+    // ❌ Select Packages Intent (No longer directly used for group flow, but kept for clarity)
+    // This intent will not be hit if the 'Select Booking Type Intent' for 'group' directly
+    // leads to 'awaiting-guest-count'.
+    if (intent === "Select Packages Intent") {
+        console.log(`DEBUG: Entering Select Packages Intent. (This should not be hit for new group flow)`);
+        // This logic remains for historical context or if you re-introduce package selection.
+        const selectedPackages = getParameter(dialogflowRequest, 'packages');
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-      console.log(`DEBUG: AskVenueDetailsIntent - venueRaw (after array check): ${venueRaw}`);
+        const allAvailablePackages = await getAvailablePackages();
 
-      if (!venueRaw) {
-        console.log(`DEBUG: AskVenueDetailsIntent - No venueRaw found.`);
-        return res.json({
-          fulfillmentText: `I couldn't catch the venue name. Could you say it again?`,
+        let validPackageNames = [];
+        let validPackageIds = [];
+        let totalPackagePrice = 0;
+
+        const packagesToProcess = Array.isArray(selectedPackages) ? selectedPackages : (selectedPackages ? [selectedPackages] : []);
+
+        packagesToProcess.forEach(selectedName => {
+            const foundPackage = allAvailablePackages.find(p => p.name.toLowerCase() === selectedName.toLowerCase());
+            if (foundPackage) {
+                validPackageNames.push(foundPackage.name);
+                validPackageIds.push(foundPackage.id);
+                totalPackagePrice += foundPackage.price;
+            }
         });
-      }
 
-      const venueName = venueRaw.toLowerCase();
-      const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_VENUES_TABLE_ID}`;
-      const cfg = {
-        headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
-      };
-      let resp;
-      try {
-        resp = await axios.get(url, cfg);
-        console.log(`DEBUG: AskVenueDetailsIntent - Fetched venues from Airtable.`);
-      } catch (error) {
-        console.error("❌ AskVenueDetailsIntent - Error fetching venues from Airtable:", error.message);
+        if (validPackageNames.length === 0) {
+            return res.json({ fulfillmentText: await generateGeminiReply("I couldn't find those packages. Please select from our available packages."),
+                outputContexts: [{
+                    name: `${session}/contexts/awaiting-package-selection`,
+                    lifespanCount: 2
+                }]
+            });
+        }
+
+        currentBookingDetails.packages = validPackageNames;
+        currentBookingDetails.package_ids = validPackageIds;
+        currentBookingDetails.grand_total = (currentBookingDetails.grand_total || 0) + totalPackagePrice;
+
         return res.json({
-            fulfillmentText: "There was a problem fetching venue details. Please try again."
+            fulfillmentText: await generateGeminiReply(`Got it! You've selected ${validPackageNames.join(' and ')}. How many guests will there be?`),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                },
+                {
+                    name: `${session}/contexts/awaiting-guest-count`,
+                    lifespanCount: 2
+                }
+            ]
         });
-      }
+    }
 
+    // ✅ Capture Guest Count Intent
+    if (intent === "Capture Guest Count Intent") {
+        console.log(`DEBUG: Entering Capture Guest Count Intent.`);
+        const guestCount = getParameter(dialogflowRequest, 'number');
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-      const match = resp.data.records.find(
-        (r) =>
-          r.fields.space_name &&
-          r.fields.space_name.toLowerCase() === venueName
-      );
+        if (!guestCount || guestCount <= 0) {
+            return res.json({ fulfillmentText: await generateGeminiReply("Please provide a valid number of guests.") });
+        }
 
-      if (!match) {
-        console.log(`DEBUG: AskVenueDetailsIntent - No match found for venue: ${venueName}`);
+        currentBookingDetails.guestCount = guestCount;
+
         return res.json({
-          fulfillmentText: `Sorry, I couldn't find details for "${venueRaw}".`,
+            fulfillmentText: await generateGeminiReply("And on what date and time would you like to book? (e.g., 'tomorrow at 7 PM')"),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                },
+                {
+                    name: `${session}/contexts/awaiting-datetime`,
+                    lifespanCount: 2
+                }
+            ]
         });
-      }
+    }
 
-      const venue = match.fields;
-      // 🚨 MODIFIED PROMPT FOR Ask Venue Details Intent
-      const prompt = `The user asked for details about the venue "${venue.space_name}". The standing capacity is ${venue.standing_capacity}. Here is the description: ${venue.description || "No description provided."} As a helpful booking concierge, explain this information clearly to the user. Do NOT ask any follow up questions.`;
+    // ✅ Capture DateTime Intent
+    if (intent === "Capture DateTime Intent") {
+        console.log(`DEBUG: Entering Capture DateTime Intent.`);
+        const dateParam = getParameter(dialogflowRequest, 'date');
+        const timeParam = getParameter(dialogflowRequest, 'time');
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-      console.log(`DEBUG: AskVenueDetailsIntent - Gemini prompt: ${prompt}`);
-      const reply = await generateGeminiReply(prompt);
-      console.log(`DEBUG: AskVenueDetailsIntent - Gemini reply: ${reply}`);
+        if (!dateParam || !timeParam) {
+            return res.json({ fulfillmentText: await generateGeminiReply("I need both a date and a time for your booking. Please tell me again.") });
+        }
 
-      // 🚨 NEW: Set the venue name in the booking-flow context
-      return res.json({ 
-        fulfillmentText: reply,
-        outputContexts: [
-          {
-            name: `${session}/contexts/booking-flow`,
-            lifespanCount: 5, 
-            parameters: { 
-              venue: venue.space_name, 
-              space_id: match.id, 
-            }, 
-          },
-        ],
-      });
+        const bookingDateTimeStr = `${dateParam.substring(0, 10)}T${timeParam.substring(11, 19)}`;
+        const bookingMoment = moment.tz(bookingDateTimeStr, 'YYYY-MM-DDTHH:mm:ss', 'Asia/Dubai');
+
+        if (!bookingMoment.isValid()) {
+            console.error(`Invalid date or time from Dialogflow: Date=${dateParam}, Time=${timeParam}`);
+            return res.json({ fulfillmentText: await generateGeminiReply("I couldn't understand that date or time. Please use a common format like 'tomorrow at 7 PM'.") });
+        }
+
+        currentBookingDetails.bookingDate = bookingMoment.format('YYYY-MM-DD');
+        currentBookingDetails.bookingTime = bookingMoment.format('HH:mm');
+        currentBookingDetails.bookingUTC = bookingMoment.toISOString();
+
+        const venues = await getAvailableVenues();
+        const venueNames = venues.map(v => v.name).join(', ');
+
+        return res.json({
+            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? We have: ${venueNames}.`),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                },
+                {
+                    name: `${session}/contexts/awaiting-venue-selection`,
+                    lifespanCount: 2
+                }
+            ]
+        });
     }
 
     // ✅ Select Venue Intent
-    if (intent.trim() === "Select Venue Intent") {
-      console.log("DEBUG: Entered SelectVenueIntent block (after trim check).");
-      console.log("📥 Raw Params (SelectVenueIntent):", JSON.stringify(params, null, 2));
-      console.log("📥 Contexts (SelectVenueIntent):", JSON.stringify(contexts, null, 2));
+    if (intent === "Select Venue Intent") {
+        console.log(`DEBUG: Entering Select Venue Intent.`);
+        const venueName = getParameter(dialogflowRequest, 'venue_name');
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-      try { 
-        let venueRaw;
-        if (Array.isArray(params.venue_name)) {
-            venueRaw = params.venue_name[params.venue_name.length - 1];
-        } else {
-            venueRaw = params.venue_name;
+        const availableVenues = await getAvailableVenues();
+        const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueName.toLowerCase());
+
+        if (!selectedVenue) {
+            return res.json({ fulfillmentText: await generateGeminiReply("I couldn't find that venue. Please select from the available venues.") });
         }
 
-        console.log(`DEBUG: SelectVenueIntent - venueRaw (from Dialogflow parameter): ${venueRaw}`);
+        currentBookingDetails.venue = selectedVenue.name;
+        currentBookingDetails.venue_id = selectedVenue.id;
 
-        const bookingFlowCtx = findContext("booking-flow");
-        console.log(`DEBUG: SelectVenueIntent - bookingFlowCtx: ${JSON.stringify(bookingFlowCtx, null, 2)}`);
-        let { guestCount, bookingUTC, type, venue: contextVenueName, space_id: contextSpaceId, packages: selectedPackagesInContext } = bookingFlowCtx?.parameters || {};
-
-        if ((!venueRaw || venueRaw === '.') && contextVenueName) {
-            venueRaw = contextVenueName;
-            if (!params.space_id && contextSpaceId) {
-                params.space_id = contextSpaceId;
-            }
-            console.log(`DEBUG: SelectVenueIntent - venueRaw pulled from context: ${venueRaw}`);
-        }
-
-        console.log(`DEBUG: SelectVenueIntent - guestCount: ${guestCount}, bookingUTC: ${bookingUTC}, type: ${type}`);
-
-        if (!guestCount || !bookingUTC) {
-          console.warn("⚠️ Missing booking details in SelectVenueIntent:", { guestCount, bookingUTC });
-          return res.json({
-            fulfillmentText: `To book ${venueRaw}, I'll also need to know the number of guests, the date, and the time. Could you please provide those details?`,
+        // MODIFIED: For both table and group, now directly ask for contact details
+        return res.json({
+            fulfillmentText: await generateGeminiReply(`Great! You've chosen ${selectedVenue.name}. Now, could I get your full name, email, and phone number to finalize your inquiry?`),
             outputContexts: [
-              {
-                name: `${session}/contexts/booking-flow`,
-                lifespanCount: 5,
-                parameters: { venue: venueRaw }, 
-              },
-            ],
-          });
-        }
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                },
+                {
+                    name: `${session}/contexts/awaiting-contact-details`, // Direct to contact details
+                    lifespanCount: 2
+                }
+            ]
+        });
+    }
 
-        const venueName = venueRaw.toLowerCase();
-        console.log("🔍 Searching for venue (SelectVenueIntent):", venueName);
+    // ❌ Capture Add-ons Intent (No longer directly used for group flow, but kept for clarity)
+    // This intent will not be hit if the 'Select Venue Intent' for 'group' directly
+    // leads to 'awaiting-contact-details'.
+    if (intent === "Capture Add-ons Intent" || intent === "No Add-ons Intent") {
+        console.log(`DEBUG: Entering Capture Add-ons Intent. (This should not be hit for new group flow)`);
+        // This logic remains for historical context or if you re-introduce add-on selection.
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+        let selectedAddOnNames = [];
+        let totalAddOnPrice = 0;
 
-        const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_VENUES_TABLE_ID}`;
-        const cfg = {
-          headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
-        };
-        let resp;
-        try {
-          resp = await axios.get(url, cfg);
-          console.log(`DEBUG: SelectVenueIntent - Fetched venues from Airtable.`);
-        } catch (error) {
-          console.error("❌ SelectVenueIntent - Error fetching venues from Airtable:", error.message);
-          return res.json({
-              fulfillmentText: "There was a problem fetching venue details. Please try again."
-          });
-        }
+        if (intent === "Capture Add-ons Intent") {
+            const addOnsParam = getParameter(dialogflowRequest, 'add_ons');
+            const addOnsToProcess = Array.isArray(addOnsParam) ? addOnsParam : (addOnsParam ? [addOnsParam] : []);
 
-        const match = resp.data.records.find(
-          (r) =>
-            r.fields.space_name &&
-            r.fields.space_name.toLowerCase() === venueName &&
-            r.fields.standing_capacity >= guestCount
-        );
+            const allAvailableAddOns = await getAvailableAddOns();
 
-        if (!match) {
-          console.warn(`❌ Venue not matched (SelectVenueIntent): ${venueName} for ${guestCount} guests`);
-          return res.json({
-            fulfillmentText: `Hmm, I couldn’t find that venue for your group size. Could you try another?`,
-          });
-        }
+            addOnsToProcess.forEach(selectedName => {
+                const foundAddOn = allAvailableAddOns.find(a => a.name.toLowerCase() === selectedName.toLowerCase());
+                if (foundAddOn) {
+                    selectedAddOnNames.push(foundAddOn.name);
+                    totalAddOnPrice += foundAddOn.price;
+                }
+            });
 
-        const { date, time } = formatDubai(bookingUTC);
-
-        let prompt;
-        let outputContexts = [
-            {
-              name: `${session}/contexts/booking-flow`,
-              lifespanCount: 5,
-              parameters: { 
-                guestCount, 
-                bookingUTC, 
-                venue: match.fields.space_name, 
-                space_id: match.id, 
-                type 
-              }, 
-            },
-        ];
-
-        // Check if packages are already selected in the context
-        if (type === 'group' && selectedPackagesInContext && selectedPackagesInContext.length > 0) {
-            console.log(`DEBUG: Packages already selected: ${selectedPackagesInContext.join(', ')}. Skipping package type question.`);
-            // If packages are already selected, proceed to ask about add-ons or finalize
-            const availableAddOns = await getAvailableAddOns();
-            let addOnDetailsList = "";
-            if (availableAddOns.length > 0) {
-                addOnDetailsList = availableAddOns.map(ao => {
-                    const priceInfo = ao.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
-                    return `${ao.name} (Cost: AED${priceInfo})`;
-                }).join('; ');
-            }
-
-            if (addOnDetailsList) {
-                prompt = `Great! You've selected ${selectedPackagesInContext.join(' and ')}. Would you like to add any extras? We have: ${addOnDetailsList}. If not, you can just say "no add-ons" or "that's all".`;
-                outputContexts.push({
-                    name: `${session}/contexts/awaiting-add-on-selection`,
-                    lifespanCount: 2,
-                });
-            } else {
-                prompt = `Great! You've selected ${selectedPackagesInContext.join(' and ')}. We don't seem to have any add-ons available right now. To finalize your booking, could I please get your full name, mobile number, and email address?`;
-                outputContexts.push({
-                    name: `${session}/contexts/awaiting-guest-details`, // Assuming this is the next step for finalization
-                    lifespanCount: 2,
+            if (selectedAddOnNames.length === 0 && addOnsToProcess.length > 0) {
+                return res.json({ fulfillmentText: await generateGeminiReply("I couldn't find those add-ons. Please select from our available add-ons, or say 'no add-ons'."),
+                    outputContexts: [{
+                        name: `${session}/contexts/awaiting-add-ons`,
+                        lifespanCount: 2
+                    }]
                 });
             }
-        } else if (type === 'group') {
-          // MODIFIED: Ask specifically for food or beverage packages AND duration
-          prompt = `Confirm the booking for ${guestCount} guests on ${date} at ${time} in the ${match.fields.space_name}. State that for group bookings, we have pre-curated package options. Would you be interested in food packages, beverage packages, or perhaps both? And for how long are you planning your event to be?`;
-          outputContexts.push({
-              name: `${session}/contexts/awaiting-package-type-selection`,
-              lifespanCount: 2,
-          });
-        } else { 
-          prompt = `The user chose "${match.fields.space_name}" for their booking of ${guestCount} guests on ${date} at ${time}. Please generate a concise and warm confirmation. Then, immediately ask for their full name, mobile number, and email address to finalize the booking, all in one smooth utterance.`;
-          outputContexts.push({
-              name: `${session}/contexts/awaiting-guest-details`, // Assuming this is the next step for finalization
-              lifespanCount: 2,
-          });
         }
-        console.log(`DEBUG: SelectVenueIntent - Gemini prompt: ${prompt}`);
-        const reply = await generateGeminiReply(prompt);
-        console.log(`DEBUG: SelectVenueIntent - Gemini reply: ${reply}`);
 
-        console.log("DEBUG: About to send response for SelectVenueIntent.");
+        currentBookingDetails.selected_add_ons = selectedAddOnNames;
+        currentBookingDetails.grand_total = (currentBookingDetails.grand_total || 0) + totalAddOnPrice;
 
         return res.json({
-          fulfillmentText: reply,
-          outputContexts: outputContexts,
-        });
-      } catch (error) {
-        console.error("❌ SelectVenueIntent - Unhandled error:", error);
-        return res.json({
-            fulfillmentText: "There was a technical issue processing your venue selection. Please try again."
-        });
-      }
-    }
-
-    // ✅ Get Package Details Intent (Initial request for package categories)
-    if (intent === "Get Package Details") { 
-        console.log(`DEBUG: Entering Get Package Details Intent.`); 
-        console.log(`DEBUG: Raw params for Get Package Details Intent: ${JSON.stringify(params, null, 2)}`); 
-        console.log(`DEBUG: Raw req.body.queryResult.parameters: ${JSON.stringify(req.body.queryResult.parameters, null, 2)}`); 
-
-        const bookingFlowCtx = findContext("booking-flow");
-        if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
-            console.log("DEBUG: Booking flow context missing or not group type in Get Package Details Intent."); 
-            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your group booking details. Please start over.") });
-        }
-
-        const bookingParams = bookingFlowCtx.parameters;
-
-        let packageCategories = [];
-        if (req.body.queryResult.parameters.packagecategory) {
-            if (Array.isArray(req.body.queryResult.parameters.packagecategory)) {
-                packageCategories = req.body.queryResult.parameters.packagecategory;
-            } else {
-                packageCategories = [req.body.queryResult.parameters.packagecategory];
-            }
-        }
-
-        let durationHours = Array.isArray(params.duration_value) ? params.duration_value[0] : params.duration_value;
-        if (params.duration && !durationHours) { // If duration is present but duration_value (number) is not
-            const durationMatch = params.duration.match(/(\d+)\s*hour/i);
-            if (durationMatch && durationMatch[1]) {
-                durationHours = parseInt(durationMatch[1], 10);
-            }
-        }
-
-        // Update booking-flow context with duration if provided
-        if (durationHours) {
-            bookingParams.duration_value = durationHours;
-            bookingParams.duration = `${durationHours} hour${durationHours > 1 ? 's' : ''}`;
-        }
-
-        const allPackages = await getAvailablePackages();
-        let filteredPackages = allPackages;
-
-        if (packageCategories.length > 0) {
-            filteredPackages = allPackages.filter(p => 
-                packageCategories.some(cat => p.category.toLowerCase().includes(cat.toLowerCase()))
-            );
-            console.log(`DEBUG: Filtered packages by categories: ${packageCategories.join(', ')}. Count: ${filteredPackages.length}`);
-        }
-
-        if (durationHours) {
-            filteredPackages = filteredPackages.filter(p => {
-                const inclusionsMatch = p.inclusions.match(/(\d+)\s*hour/i);
-                const packageDuration = inclusionsMatch ? parseInt(inclusionsMatch[1], 10) : 0;
-                return packageDuration === durationHours;
-            });
-            console.log(`DEBUG: Further filtered packages by duration: ${durationHours} hours. Count: ${filteredPackages.length}`);
-        }
-
-        if (filteredPackages.length === 0) {
-            const prompt = `I couldn't find any packages for your criteria. Please apologize and ask if they would like to try different categories or duration.`;
-            return res.json({ fulfillmentText: await generateGeminiReply(prompt) });
-        }
-
-        const packageList = filteredPackages.map(p => {
-            const priceInfo = p.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
-            return `${p.name} (Cost: AED${priceInfo}, Inclusions: ${p.inclusions})`;
-        }).join('; ');
-
-        const prompt = `Here are the available packages based on your selection: ${packageList}. Please ask the user to choose one or more packages by name.`;
-        const reply = await generateGeminiReply(prompt);
-
-        return res.json({
-            fulfillmentText: reply,
+            fulfillmentText: await generateGeminiReply(`Okay, ${selectedAddOnNames.length > 0 ? `you've added ${selectedAddOnNames.join(' and ')}.` : `no add-ons.`} Now, could I get your full name, email, and phone number to finalize?`),
             outputContexts: [
                 {
                     name: `${session}/contexts/booking-flow`,
                     lifespanCount: 5,
-                    parameters: { 
-                        ...bookingParams, // Preserve existing booking parameters
-                        last_queried_packages: filteredPackages, // Store the list of packages shown
-                        last_queried_categories: packageCategories // Store categories for follow-up
-                    }
+                    parameters: currentBookingDetails
                 },
                 {
-                    name: `${session}/contexts/awaiting-package-selection`,
-                    lifespanCount: 2, // Activate context for package selection
+                    name: `${session}/contexts/awaiting-contact-details`,
+                    lifespanCount: 2
                 }
             ]
         });
     }
 
-    // ✅ Select Package Intent (User selects specific packages from the list)
-    if (intent === "Select Package Intent") {
-        console.log(`DEBUG: Entering Select Package Intent.`);
-        const bookingFlowCtx = findContext("booking-flow");
-        if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
-            console.log("DEBUG: Booking flow context missing or not group type in Select Package Intent.");
-            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your group booking details. Please start over.") });
-        }
+    // ✅ Capture Contact Details Intent
+    if (intent === "Capture Contact Details Intent") {
+        console.log(`DEBUG: Entering Capture Contact Details Intent.`);
+        const fullName = getParameter(dialogflowRequest, 'full_name');
+        const emailId = getParameter(dialogflowRequest, 'email');
+        const phoneNumber = getParameter(dialogflowRequest, 'phone_number');
 
-        const bookingParams = bookingFlowCtx.parameters;
-        const lastQueriedPackages = bookingParams.last_queried_packages || [];
-        const selectedPackageNames = Array.isArray(params.package) ? params.package : (params.package ? [params.package] : []);
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-        console.log(`DEBUG: Selected package names from Dialogflow: ${selectedPackageNames.join(', ')}`);
-
-        const selectedPackages = selectedPackageNames.map(name => 
-            lastQueriedPackages.find(p => p.name.toLowerCase() === name.toLowerCase())
-        ).filter(Boolean); // Filter out undefined/null if no match found
-
-        if (selectedPackages.length === 0) {
-            const prompt = `I couldn't find any of the packages you mentioned. Please list the packages you want to select from the options I provided earlier.`;
-            return res.json({ fulfillmentText: await generateGeminiReply(prompt) });
-        }
-
-        // Calculate total price for selected packages
-        const totalPackagesCost = selectedPackages.reduce((sum, p) => sum + p.price, 0);
-
-        // Update booking-flow context with selected packages and total cost
-        bookingParams.packages = selectedPackages.map(p => p.name); // Store names
-        bookingParams.package_ids = selectedPackages.map(p => p.id); // Store IDs for Airtable linking
-        bookingParams.total_packages_cost = totalPackagesCost;
-
-        const selectedPackageNamesStr = selectedPackages.map(p => p.name).join(' and ');
-
-        const availableAddOns = await getAvailableAddOns();
-        let addOnDetailsList = "";
-        if (availableAddOns.length > 0) {
-            addOnDetailsList = availableAddOns.map(ao => {
-                const priceInfo = ao.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
-                return `${ao.name} (Cost: AED${priceInfo})`;
-            }).join('; ');
-        }
-
-        let prompt;
-        let outputContexts = [
-            {
-                name: `${session}/contexts/booking-flow`,
-                lifespanCount: 5,
-                parameters: bookingParams // Updated booking parameters
-            }
-        ];
-
-        if (addOnDetailsList) {
-            prompt = `Okay, great choice with ${selectedPackageNamesStr}! Would you like to add any extras? We have: ${addOnDetailsList}. If not, you can just say "no add-ons" or "that's all".`;
-            outputContexts.push({
-                name: `${session}/contexts/awaiting-add-on-selection`,
-                lifespanCount: 2,
-            });
-        } else {
-            prompt = `Okay, great choice with ${selectedPackageNamesStr}! We don't seem to have any add-ons available right now. To finalize your booking, could I please get your full name, mobile number, and email address?`;
-            outputContexts.push({
-                name: `${session}/contexts/awaiting-guest-details`, // Assuming this is the next step for finalization
-                lifespanCount: 2,
-            });
-        }
-
-        return res.json({
-            fulfillmentText: await generateGeminiReply(prompt),
-            outputContexts: outputContexts
-        });
-    }
-
-    // ✅ Add Add-Ons Intent
-    if (intent === "Add Add-Ons Intent") {
-        console.log(`DEBUG: Entering Add Add-Ons Intent.`);
-        const bookingFlowCtx = findContext("booking-flow");
-        if (!bookingFlowCtx) {
-            console.log("DEBUG: Booking flow context missing in Add Add-Ons Intent.");
-            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your booking details. Please start over.") });
-        }
-        const bookingParams = bookingFlowCtx.parameters;
-
-        const selectedAddOnNames = Array.isArray(params.add_on) ? params.add_on : (params.add_on ? [params.add_on] : []);
-        console.log(`DEBUG: Selected add-on names from Dialogflow: ${selectedAddOnNames.join(', ')}`);
-
-        if (selectedAddOnNames.length === 0) {
-            const prompt = `I didn't catch which add-ons you'd like. Could you please specify?`;
-            return res.json({ fulfillmentText: await generateGeminiReply(prompt) });
-        }
-
-        const availableAddOns = await getAvailableAddOns();
-        const validAddOns = selectedAddOnNames.map(name => 
-            availableAddOns.find(ao => ao.name.toLowerCase() === name.toLowerCase())
-        ).filter(Boolean);
-
-        if (validAddOns.length === 0) {
-            const prompt = `I couldn't find any of the add-ons you mentioned. Please choose from the available options.`;
-            return res.json({ fulfillmentText: await generateGeminiReply(prompt) });
-        }
-
-        // Calculate total cost of selected add-ons
-        const totalAddOnsCost = validAddOns.reduce((sum, ao) => sum + ao.price, 0);
-
-        // Update booking-flow context with selected add-ons and their cost
-        bookingParams.selected_add_ons = (bookingParams.selected_add_ons || []).concat(validAddOns.map(ao => ao.name));
-        bookingParams.total_add_ons_cost = (bookingParams.total_add_ons_cost || 0) + totalAddOnsCost;
-
-        // Calculate grand total
-        bookingParams.grand_total = (bookingParams.total_packages_cost || 0) + (bookingParams.total_add_ons_cost || 0);
-
-        const prompt = `Okay, I've added ${validAddOns.map(ao => ao.name).join(' and ')}. Your current grand total is AED${bookingParams.grand_total.toFixed(2)}. To finalize your booking, could I please get your full name, mobile number, and email address?`;
-
-        return res.json({
-            fulfillmentText: await generateGeminiReply(prompt),
-            outputContexts: [
-                {
-                    name: `${session}/contexts/booking-flow`,
-                    lifespanCount: 5,
-                    parameters: bookingParams // Updated booking parameters
-                },
-                {
-                    name: `${session}/contexts/awaiting-guest-details`, // Move to guest details after add-ons
-                    lifespanCount: 2,
-                }
-            ]
-        });
-    }
-
-    // ✅ No Add-Ons Intent
-    if (intent === "No Add-Ons Intent") {
-        console.log(`DEBUG: Entering No Add-Ons Intent.`);
-        const bookingFlowCtx = findContext("booking-flow");
-        if (!bookingFlowCtx) {
-            console.log("DEBUG: Booking flow context missing in No Add-Ons Intent.");
-            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your booking details. Please start over.") });
-        }
-
-        const bookingParams = bookingFlowCtx.parameters;
-        bookingParams.selected_add_ons = []; // Clear any potential add-ons
-        bookingParams.total_add_ons_cost = 0;
-
-        // Calculate grand total (only packages cost)
-        bookingParams.grand_total = bookingParams.total_packages_cost || 0;
-
-        const prompt = `Okay, no add-ons selected. Your current total is AED${bookingParams.grand_total.toFixed(2)}. To finalize your booking, could I please get your full name, mobile number, and email address?`;
-
-        return res.json({
-            fulfillmentText: await generateGeminiReply(prompt),
-            outputContexts: [
-                {
-                    name: `${session}/contexts/booking-flow`,
-                    lifespanCount: 5,
-                    parameters: bookingParams // Updated booking parameters
-                },
-                {
-                    name: `${session}/contexts/awaiting-guest-details`, // Move to guest details
-                    lifespanCount: 2,
-                }
-            ]
-        });
-    }
-
-    // ✅ Collect Contact Details Intent
-    if (intent === "CollectContactDetails") {
-        console.log(`DEBUG: Entering CollectContactDetails Intent.`);
-        // Log the raw params object to see its structure
-        console.log(`DEBUG: Raw params in CollectContactDetails: ${JSON.stringify(params, null, 2)}`);
-
-        const bookingFlowCtx = findContext("booking-flow");
-        if (!bookingFlowCtx) {
-            console.error("❌ CollectContactDetails - Booking flow context missing!");
-            return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your booking details. Please start over.") });
-        }
-
-        const bookingDetails = bookingFlowCtx.parameters;
-        // Retrieve existing details from context, or initialize if not present
-        let fullName = bookingDetails.full_name || '';
-        let mobileNumber = bookingDetails.mobile_number || '';
-        let emailAddress = bookingDetails.email_id || '';
-
-        // Update with new parameters from the current turn
-        // Ensure we handle the personName object structure correctly
-        if (params.personName && typeof params.personName === 'object' && params.personName.name) {
-            fullName = params.personName.name;
-        } else if (params.personName && typeof params.personName === 'string') { // Fallback for direct string
-            fullName = params.personName;
-        }
-        if (params.phoneNumber) {
-            mobileNumber = params.phoneNumber;
-        }
-        if (params.emailAddress) {
-            emailAddress = params.emailAddress;
-        }
-
-        console.log(`DEBUG: Collected contact details (after update) - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
-        console.log(`DEBUG: fullName: '${fullName}' (Type: ${typeof fullName})`);
-        console.log(`DEBUG: mobileNumber: '${mobileNumber}' (Type: ${typeof mobileNumber})`);
-        console.log(`DEBUG: emailAddress: '${emailAddress}' (Type: ${typeof emailAddress})`);
-
-
-        // Update bookingDetails in context for persistence
-        bookingDetails.full_name = fullName;
-        bookingDetails.mobile_number = mobileNumber;
-        bookingDetails.email_id = emailAddress;
-
-        let finalConfirmationPrompt;
-        let outputContexts = [
-            {
-                name: `${session}/contexts/booking-flow`,
-                lifespanCount: 5,
-                parameters: bookingDetails // Always update booking-flow context
-            }
-        ];
-
-        // Check if all required contact details are present
-        if (fullName && mobileNumber && emailAddress) {
-            console.log("DEBUG: All contact details present. Proceeding to summary.");
-            // Generate summary for confirmation
-            const { date, time } = formatDubai(bookingDetails.bookingUTC);
-            const venueName = bookingDetails.venue || "the selected venue";
-            const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
-
-            let totalPrice = '';
-            if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
-                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
-            } else if (bookingDetails.type === 'table' && bookingDetails.grand_total > 0) {
-                // Only show total for table booking if there's an actual cost (e.g., cover charge)
-                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
-            }
-
-            const summaryText = `your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary}${totalPrice}`;
-            finalConfirmationPrompt = `Alright, ${fullName}! So, just to confirm, ${summaryText}. Does that all sound correct?`;
-
-            outputContexts.push({
-                name: `${session}/contexts/awaiting-final-confirmation`, // New context to await final confirmation
-                lifespanCount: 2,
-                parameters: {
-                    // Pass collected contact details to this context as well, if needed for the final confirmation prompt
-                    full_name: fullName,
-                    mobile_number: mobileNumber,
-                    email_id: emailAddress
-                }
-            });
-            // Clear awaiting-guest-details context as we have all info
-            outputContexts.push({
-                name: `${session}/contexts/awaiting-guest-details`,
-                lifespanCount: 0,
-            });
-
-        } else {
-            console.log("DEBUG: Missing contact details. Prompting again.");
-            // If not all contact details are present, prompt for them.
+        // Basic validation (can be enhanced)
+        if (!fullName || !emailId || !phoneNumber) {
             let missingFields = [];
-            if (!fullName) missingFields.push("full name");
-            if (!mobileNumber) missingFields.push("mobile number");
-            if (!emailAddress) missingFields.push("email address");
-
-            finalConfirmationPrompt = `I still need your ${missingFields.join(' and ')} to finalize the booking.`;
-
-            // Keep the awaiting-guest-details context active
-            outputContexts.push({
-                name: `${session}/contexts/awaiting-guest-details`,
-                lifespanCount: 2,
-                parameters: { // Pass back what was collected to maintain state
-                    personName: fullName, // Use personName as per Dialogflow parameter name
-                    phoneNumber: mobileNumber, // Use phoneNumber as per Dialogflow parameter name
-                    emailAddress: emailAddress // Use emailAddress as per Dialogflow parameter name
-                }
+            if (!fullName) missingFields.push('full name');
+            if (!emailId) missingFields.push('email');
+            if (!phoneNumber) missingFields.push('phone number');
+            return res.json({ fulfillmentText: await generateGeminiReply(`I'm missing your ${missingFields.join(', ')}. Could you please provide all of them?`),
+                outputContexts: [{
+                    name: `${session}/contexts/awaiting-contact-details`,
+                    lifespanCount: 2
+                }]
             });
         }
 
+        currentBookingDetails.full_name = fullName;
+        currentBookingDetails.email_id = emailId;
+        currentBookingDetails.phone_number = phoneNumber;
+
+        // MODIFIED: Generate summary based on booking type (table vs. group lead)
+        let summaryText;
+        if (currentBookingDetails.type === 'group') {
+            summaryText = `Alright, ${fullName}, let's summarize your group inquiry:\n`;
+            summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+            summaryText += `Date: ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}\n`;
+            summaryText += `Venue: ${currentBookingDetails.venue}\n`;
+            summaryText += `Email: ${currentBookingDetails.email_id}\n`;
+            summaryText += `Mobile: ${currentBookingDetails.phone_number}\n`;
+            summaryText += `Is this all correct? (Yes/No)`;
+            // NO packages, add-ons, or total price for group leads here.
+        } else { // It's a table booking (<10 guests)
+            summaryText = `Alright, ${fullName}, let's summarize your table reservation:\n`;
+            summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+            summaryText += `Date: ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}\n`;
+            summaryText += `Venue: ${currentBookingDetails.venue}\n`;
+            // Add other table booking specific details if any, including grand_total if calculated earlier
+            if (currentBookingDetails.grand_total) {
+                summaryText += `Estimated Total: AED${currentBookingDetails.grand_total.toFixed(2)}\n`;
+            }
+            summaryText += `Is this all correct? (Yes/No)`;
+        }
+
         return res.json({
-            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
-            outputContexts: outputContexts
+            fulfillmentText: await generateGeminiReply(summaryText),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                },
+                {
+                    name: `${session}/contexts/awaiting-confirmation`, // Still await confirmation from user
+                    lifespanCount: 2
+                }
+            ]
         });
     }
 
-    // ✅ Confirm Booking Intent (NEW BLOCK - triggered after summary presented)
+    // ✅ Confirm Booking Intent (User says Yes to summary)
     if (intent === "Confirm Booking Intent") {
         console.log(`DEBUG: Entering Confirm Booking Intent.`);
-        const bookingFlowCtx = findContext("booking-flow");
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
         if (!bookingFlowCtx) {
             console.error("❌ Confirm Booking Intent - Booking flow context missing!");
             return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your booking details. Please start over.") });
@@ -1097,70 +662,168 @@ app.post("/webhook", async (req, res) => {
         const bookingDetails = bookingFlowCtx.parameters;
 
         let finalConfirmationPrompt;
-        try {
-            // Attempt to create the booking in Airtable
-            const createdBookingRecord = await createBooking(bookingDetails);
+        let outputContextsToSet = [];
 
-            // If add-ons were selected, create records for them
-            if (bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0) {
-                const allAvailableAddOns = await getAvailableAddOns(); // Fetch all add-ons to get their IDs
-                await createBookingAddons(createdBookingRecord.id, bookingDetails.selected_add_ons, allAvailableAddOns);
+        // MODIFIED: Now both types use createBooking, but with different statuses and data.
+        if (bookingDetails.type === 'table') {
+            try {
+                // Create full booking record with 'Confirmed' status
+                const createdBookingRecord = await createBooking(bookingDetails, 'Confirmed'); 
+                // No add-ons for table bookings in this simplified flow, so no createBookingAddons call here.
+
+                // Generate confirmation message for table booking
+                const { date, time } = formatDubai(bookingDetails.bookingUTC);
+                const venueName = bookingDetails.venue || "the selected venue";
+                let totalPrice = '';
+                if (bookingDetails.grand_total && bookingDetails.grand_total > 0) {
+                    totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
+                }
+                finalConfirmationPrompt = `Excellent, ${bookingDetails.full_name}! Your table reservation for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time} is now confirmed!${totalPrice} A confirmation email will be sent to ${bookingDetails.email_id}. Thank you!`;
+
+                outputContextsToSet = [
+                    { name: `${session}/contexts/booking-finalized`, lifespanCount: 1 },
+                    { name: `${session}/contexts/booking-flow`, lifespanCount: 0 },
+                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                ];
+
+            } catch (error) {
+                console.error("❌ Confirm Booking Intent (Table) - Error finalizing booking:", error.message);
+                finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your table reservation. Please try again or contact us directly.";
+                outputContextsToSet = [
+                    { name: `${session}/contexts/booking-flow`, lifespanCount: 2 },
+                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                ];
             }
+        } else if (bookingDetails.type === 'group') {
+            try {
+                // Create lead record in 'Bookings' table with 'New Lead' status
+                const createdLeadRecord = await createBooking(bookingDetails, 'New Lead'); 
+                const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
 
-            // Generate a final confirmation message
-            const { date, time } = formatDubai(bookingDetails.bookingUTC);
-            const venueName = bookingDetails.venue || "the selected venue";
-            const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
+                const { date, time } = formatDubai(bookingDetails.bookingUTC);
+                const venueName = bookingDetails.venue || "the selected venue";
 
-            let totalPrice = '';
-            if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
-                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
-            } else if (bookingDetails.type === 'table' && bookingDetails.grand_total > 0) {
-                totalPrice = ` Your total is AED${bookingDetails.grand_total.toFixed(2)}.`;
+                if (emailSent) {
+                    finalConfirmationPrompt = `Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We've just sent an email to ${bookingDetails.email_id} with our package details. Our manager will be in touch shortly to help you finalize your selection. Is there anything else I can help you with today?`;
+                } else {
+                    finalConfirmationPrompt = `Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We're having trouble sending the package details via email right now, but our manager will be in touch shortly to help you finalize your selection.`;
+                }
+
+                outputContextsToSet = [
+                    { name: `${session}/contexts/group-lead-submitted`, lifespanCount: 1 }, // New context for lead submitted
+                    { name: `${session}/contexts/booking-flow`, lifespanCount: 0 }, // Clear main context
+                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 } // Clear previous confirmation context
+                ];
+
+            } catch (error) {
+                console.error("❌ Confirm Booking Intent (Group) - Error submitting group lead or sending email:", error.message);
+                finalConfirmationPrompt = "I'm sorry, there was an issue submitting your group inquiry. Please try again or contact us directly.";
+                outputContextsToSet = [
+                    { name: `${session}/contexts/booking-flow`, lifespanCount: 2 },
+                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                ];
             }
-
-            // Use the full name from bookingDetails
-            finalConfirmationPrompt = `Excellent, ${bookingDetails.full_name}! Your booking for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}${packagesSummary}${addOnsSummary} is now confirmed!${totalPrice} A confirmation email will be sent to ${bookingDetails.email_id}. Thank you!`;
-
-        } catch (error) {
-            console.error("❌ Confirm Booking Intent - Error finalizing booking:", error.message);
-            finalConfirmationPrompt = "I'm sorry, there was an issue finalizing your booking. Please try again or contact us directly.";
+        } else {
+            // Fallback if booking type is somehow missing or invalid
+            finalConfirmationPrompt = "I'm sorry, I couldn't determine the booking type. Please try again.";
+            outputContextsToSet = [
+                { name: `${session}/contexts/booking-flow`, lifespanCount: 0 },
+                { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+            ];
         }
 
         return res.json({
             fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
+            outputContexts: outputContextsToSet
+        });
+    }
+
+    // ✅ Deny Booking Intent (User says No to summary)
+    if (intent === "Deny Booking Intent") {
+        console.log(`DEBUG: Entering Deny Booking Intent.`);
+        return res.json({
+            fulfillmentText: await generateGeminiReply("Okay, no problem. Would you like to start the booking process again or cancel entirely?"),
             outputContexts: [
                 {
-                    name: `${session}/contexts/booking-finalized`, // Indicate booking is complete
-                    lifespanCount: 1,
-                },
-                {
-                    name: `${session}/contexts/booking-flow`, // Clear/reset booking-flow context
+                    name: `${session}/contexts/booking-flow`, // Clear booking-flow context
                     lifespanCount: 0, 
                 },
                 {
-                    name: `${session}/contexts/awaiting-final-confirmation`, // Clear this context
+                    name: `${session}/contexts/awaiting-confirmation`, // Clear this context
                     lifespanCount: 0, 
+                },
+                {
+                    name: `${session}/contexts/awaiting-restart-or-cancel`, // New context for user choice
+                    lifespanCount: 2
+                }
+            ]
+        });
+    }
+
+    // ✅ Restart Booking Intent (from Deny flow)
+    if (intent === "Restart Booking Intent") {
+        console.log(`DEBUG: Entering Restart Booking Intent.`);
+        const venues = await getAvailableVenues();
+        const venueNames = venues.map(v => v.name).join(', ');
+        return res.json({
+            fulfillmentText: `Alright, let's start over! We offer bookings for ${venueNames}. Are you looking to book a table or a group event with packages?`,
+            outputContexts: [{
+                name: `${session}/contexts/awaiting-booking-type`,
+                lifespanCount: 5
+            }]
+        });
+    }
+
+    // ✅ Cancel Booking Intent (from Deny flow)
+    if (intent === "Cancel Booking Intent") {
+        console.log(`DEBUG: Entering Cancel Booking Intent.`);
+        return res.json({
+            fulfillmentText: await generateGeminiReply("Okay, I've cancelled your booking process. Feel free to reach out if you change your mind!"),
+            outputContexts: [
+                {
+                    name: `${session}/contexts/booking-flow`, // Ensure contexts are cleared
+                    lifespanCount: 0, 
+                },
+                {
+                    name: `${session}/contexts/awaiting-restart-or-cancel`,
+                    lifespanCount: 0
                 }
             ]
         });
     }
 
 
-    // Default fallback for unhandled intents (This must be the last return in the try block)
+    // Default Fallback Intent handler
+    if (intent === "Default Fallback Intent") {
+        console.log("DEBUG: Entering Default Fallback Intent.");
+        // Check if there's an active booking context to provide more relevant fallback
+        const bookingFlowCtx = findContext("booking-flow", inputContexts);
+        if (bookingFlowCtx) {
+            return res.json({ fulfillmentText: await generateGeminiReply("I'm sorry, I didn't understand that. Please tell me more about your booking preference or try rephrasing.") });
+        } else {
+            return res.json({ fulfillmentText: await generateGeminiReply("I didn't quite catch that. Could you please rephrase or tell me what you'd like to do?") });
+        }
+    }
+
+
+    // Function to format UTC date/time to Dubai timezone
+    function formatDubai(utcString) {
+        const dubaiTime = moment.tz(utcString, 'Asia/Dubai');
+        return {
+            date: dubaiTime.format('MMMM Do, YYYY'),
+            time: dubaiTime.format('h:mm A')
+        };
+    }
+
+    // If intent is not handled
     return res.json({
-      fulfillmentText: await generateGeminiReply("Sorry, I didn't get that. Can you repeat?"),
+        fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
     });
-
-  } catch (error) { // END OF TRY BLOCK, START OF CATCH BLOCK
-    console.error("❌ Webhook error:", error);
-    return res.status(500).json({
-      fulfillmentText: await generateGeminiReply("I'm sorry, there was a technical issue. Please try again later."),
-    });
-  }
-}); // CLOSING BRACE FOR app.post CALLBACK
-
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
 });
+
+// --- Start the Server ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
+
