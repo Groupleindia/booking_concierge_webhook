@@ -722,7 +722,7 @@ app.post("/webhook", async (req, res) => {
     if (intent === "Get Package Details") { 
         console.log(`DEBUG: Entering Get Package Details Intent.`); 
         console.log(`DEBUG: Raw params for Get Package Details Intent: ${JSON.stringify(params, null, 2)}`); 
-        console.log(`DEBUG: Raw req.body.queryResult.parameters: ${JSON.stringify(req.body.queryResult.parameters, null, 2)}`); 
+        console.log(`DEBUG: Raw req.body.queryResult.parameters: ${JSON.body.queryResult.parameters, null, 2)}`); 
 
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
@@ -780,7 +780,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const packageList = filteredPackages.map(p => {
-            const priceInfo = p.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
+            const priceInfo = p.price_type === 'Per Person' ? `${p.price} per person` : `${p.price}`;
             return `${p.name} (Cost: AED${priceInfo}, Inclusions: ${p.inclusions})`;
         }).join('; ');
 
@@ -979,18 +979,31 @@ app.post("/webhook", async (req, res) => {
         }
 
         const bookingDetails = bookingFlowCtx.parameters;
-        // Corrected parameter extraction based on Dialogflow JSON structure
-        const fullName = params.personName?.name || ''; // Safely get name from object, default to empty string
-        const mobileNumber = params.phoneNumber || ''; // Default to empty string
-        const emailAddress = params.emailAddress || ''; // Default to empty string
+        // Retrieve existing details from context, or initialize if not present
+        let fullName = bookingDetails.full_name || '';
+        let mobileNumber = bookingDetails.mobile_number || '';
+        let emailAddress = bookingDetails.email_id || '';
 
-        console.log(`DEBUG: Collected contact details - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
+        // Update with new parameters from the current turn
+        if (params.personName?.name) {
+            fullName = params.personName.name;
+        } else if (params.personName) { // Handle case where personName is directly a string, not an object
+            fullName = params.personName;
+        }
+        if (params.phoneNumber) {
+            mobileNumber = params.phoneNumber;
+        }
+        if (params.emailAddress) {
+            emailAddress = params.emailAddress;
+        }
+
+        console.log(`DEBUG: Collected contact details (after update) - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
         console.log(`DEBUG: fullName: '${fullName}' (Type: ${typeof fullName})`);
         console.log(`DEBUG: mobileNumber: '${mobileNumber}' (Type: ${typeof mobileNumber})`);
         console.log(`DEBUG: emailAddress: '${emailAddress}' (Type: ${typeof emailAddress})`);
 
 
-        // Update bookingDetails with contact info in the context for persistence
+        // Update bookingDetails in context for persistence
         bookingDetails.full_name = fullName;
         bookingDetails.mobile_number = mobileNumber;
         bookingDetails.email_id = emailAddress;
@@ -1011,7 +1024,7 @@ app.post("/webhook", async (req, res) => {
             const { date, time } = formatDubai(bookingDetails.bookingUTC);
             const venueName = bookingDetails.venue || "the selected venue";
             const packagesSummary = bookingDetails.packages && bookingDetails.packages.length > 0 ? ` for ${bookingDetails.packages.join(' and ')}` : '';
-            const addOnsSummary = bookingDetails.details_add_ons && bookingDetails.details_add_ons.length > 0 ? ` with ${bookingDetails.details_add_ons.join(' and ')} as add-ons` : '';
+            const addOnsSummary = bookingDetails.selected_add_ons && bookingDetails.selected_add_ons.length > 0 ? ` with ${bookingDetails.selected_add_ons.join(' and ')} as add-ons` : '';
 
             let totalPrice = '';
             if (bookingDetails.type === 'group' && bookingDetails.grand_total) {
@@ -1033,6 +1046,11 @@ app.post("/webhook", async (req, res) => {
                     mobile_number: mobileNumber,
                     email_id: emailAddress
                 }
+            });
+            // Clear awaiting-guest-details context as we have all info
+            outputContexts.push({
+                name: `${session}/contexts/awaiting-guest-details`,
+                lifespanCount: 0,
             });
 
         } else {
