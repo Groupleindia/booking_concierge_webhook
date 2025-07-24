@@ -808,12 +808,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ✅ Select Package Intent (User selects specific packages from the list)
-    if (intent === "Specify Package Intent") { // RENAMED FROM "Select Package Intent"
-        console.log(`DEBUG: Entering Specify Package Intent.`); // Updated log
-        console.log(`DEBUG: Raw params for Specify Package Intent: ${JSON.stringify(params, null, 2)}`); // Added logging for params
+    if (intent === "Select Package Intent") {
+        console.log(`DEBUG: Entering Select Package Intent.`);
         const bookingFlowCtx = findContext("booking-flow");
         if (!bookingFlowCtx || bookingFlowCtx.parameters.type !== 'group') {
-            console.log("DEBUG: Booking flow context missing or not group type in Specify Package Intent."); // Updated log
+            console.log("DEBUG: Booking flow context missing or not group type in Select Package Intent.");
             return res.json({ fulfillmentText: await generateGeminiReply("I seem to have lost your group booking details. Please start over.") });
         }
 
@@ -980,10 +979,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const bookingDetails = bookingFlowCtx.parameters;
-        // Correctly extract fullName from params.person, which can be an object or a string
-        const fullName = params.person?.name || params.person || ''; 
-        const mobileNumber = params['phone-number'] || '';
-        const emailAddress = params.email || '';
+        const { person: fullName, 'phone-number': mobileNumber, email: emailAddress } = params;
 
         console.log(`DEBUG: Collected contact details - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
 
