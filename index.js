@@ -780,7 +780,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const packageList = filteredPackages.map(p => {
-            const priceInfo = p.price_type === 'Per Person' ? `${p.price} per person` : `${p.price}`;
+            const priceInfo = p.price_type === 'Per Person' ? `${ao.price} per person` : `${ao.price}`;
             return `${p.name} (Cost: AED${priceInfo}, Inclusions: ${p.inclusions})`;
         }).join('; ');
 
