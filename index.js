@@ -4,6 +4,7 @@ const express = require("express");
 const axios = require("axios");
 const dotenv = require("dotenv");
 const moment = require("moment-timezone");
+const nodemailer = require('nodemailer'); // NEW: For sending emails
 let fetch; // Declare fetch here, it will be assigned dynamically
 
 // Use an immediately invoked async function to import node-fetch
@@ -91,6 +92,32 @@ function formatDubai(utcIso) {
 function buildDubaiUTC(date, time) {
   // Handles both 12-hour (h:mm A) and 24-hour (HH:mm) formats
   return moment.tz(`${date} ${time}`, ["YYYY-MM-DD h:mm A", "YYYY-MM-DD HH:mm"], "Asia/Dubai").toISOString();
+}
+
+/**
+ * Extracts a parameter from Dialogflow, checking multiple sources.
+ * @param {object} dialogflowRequest The Dialogflow webhook request.
+ * @param {string} paramName The name of the parameter to extract.
+ * @returns {any} The parameter value, or undefined if not found.
+ */
+function getParameter(dialogflowRequest, paramName) {
+    const queryResult = dialogflowRequest.queryResult;
+    // Check parameters from the current intent
+    if (queryResult.parameters && queryResult.parameters[paramName]) {
+        console.log(`DEBUG: Parameter '${paramName}' found in current intent parameters.`);
+        return queryResult.parameters[paramName];
+    }
+    // Check parameters from input contexts
+    if (queryResult.outputContexts) {
+        for (const context of queryResult.outputContexts) {
+            if (context.parameters && context.parameters[paramName]) {
+                console.log(`DEBUG: Parameter '${paramName}' found in output context: ${context.name}.`);
+                return context.parameters[paramName];
+            }
+        }
+    }
+    console.log(`DEBUG: Parameter '${paramName}' not found.`);
+    return undefined;
 }
 
 // 🔹 Gemini-powered AI response generator
@@ -615,10 +642,10 @@ app.post("/webhook", async (req, res) => {
     // REMOVED: Capture Add-ons Intent
     // REMOVED: No Add-ons Intent
 
-    // ✅ Capture Contact Details Intent
-    if (intent === "Capture Contact Details Intent") {
-        console.log(`DEBUG: Entering Capture Contact Details Intent.`);
-        console.log(`DEBUG: Raw params in Capture Contact Details Intent: ${JSON.stringify(params, null, 2)}`);
+    // ✅ Collect Contact Details Intent
+    if (intent === "CollectContactDetails") { // Corrected intent name
+        console.log(`DEBUG: Entering CollectContactDetails Intent.`);
+        console.log(`DEBUG: Raw params in CollectContactDetails: ${JSON.stringify(params, null, 2)}`);
 
         const bookingFlowCtx = findContext("booking-flow", contexts); // Use contexts from webhook scope
         let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
@@ -1000,7 +1027,14 @@ app.post("/webhook", async (req, res) => {
     return res.json({
         fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
     });
-});
+
+  } catch (error) { // END OF MAIN TRY BLOCK, START OF CATCH BLOCK
+    console.error("❌ Webhook error:", error);
+    return res.status(500).json({
+      fulfillmentText: await generateGeminiReply("I'm sorry, there was a technical issue. Please try again later."),
+    });
+  }
+}); // CLOSING BRACE FOR app.post CALLBACK
 
 // --- Start the Server ---
 const PORT = process.env.PORT || 3000;
