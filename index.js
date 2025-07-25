@@ -61,7 +61,7 @@ function getParameter(dialogflowRequest, paramName) {
 }
 
 /**
- * Fetches all available venues from Airtable based on guest count. (MODIFIED: Restored guestCount filter)
+ * Fetches all available venues from Airtable based on guest count.
  * @param {number} guestCount - The number of guests for the booking.
  * @returns {Array} An array of venue objects.
  */
@@ -371,10 +371,23 @@ app.post('/webhook', async (req, res) => {
 
     // --- Intent Handlers ---
 
-    // ✅ Welcome Intent / Start Booking Intent (MODIFIED to directly handle initial booking parameters)
-    // This intent should be triggered by initial booking queries like "Can you help book a party for 25 guests"
-    if (intent === "Welcome Intent" || intent === "Booking Intent") { // Using "Booking Intent" as per your old code
-        console.log("DEBUG: Entering Welcome/Booking Intent.");
+    // ✅ Welcome Intent (MODIFIED: Reverted to simple greeting)
+    if (intent === "Welcome Intent") {
+        console.log("DEBUG: Entering Welcome Intent.");
+        const venues = await getAvailableVenues(); // Get all venues, no guest count filter yet
+        const venueNames = venues.map(v => v.name).join(', ');
+        return res.json({
+            fulfillmentText: `Hello! Welcome to our booking service. We offer bookings for ${venueNames}. Are you looking to book a table or a group event with packages?`,
+            outputContexts: [{
+                name: `${session}/contexts/awaiting-booking-type`,
+                lifespanCount: 5
+            }]
+        });
+    }
+
+    // ✅ Booking Intent (MODIFIED: Now handles initial booking parameters and infers type)
+    if (intent === "Booking Intent") {
+        console.log("DEBUG: Entering Booking Intent.");
 
         let guestCount = Array.isArray(params.guestCount) ? params.guestCount[0] : params.guestCount;
         const rawBookingDate = Array.isArray(params.bookingdate) ? params.bookingdate[0] : params.bookingdate;
@@ -427,13 +440,11 @@ app.post('/webhook', async (req, res) => {
             });
 
         } else {
-            // If not all initial parameters provided, ask for booking type (original Welcome flow)
-            const venues = await getAvailableVenues(); // Get all venues, no guest count filter yet
-            const venueNames = venues.map(v => v.name).join(', ');
-            fulfillmentText = await generateGeminiReply(`Hello! Welcome to our booking service. We offer bookings for ${venueNames}. Are you looking to book a table or a group event with packages?`);
+            // If not all initial parameters provided, ask for guest count
+            fulfillmentText = await generateGeminiReply(`To help you book, how many guests will there be?`);
             outputContexts.push({
-                name: `${session}/contexts/awaiting-booking-type`,
-                lifespanCount: 5
+                name: `${session}/contexts/awaiting-guest-count`,
+                lifespanCount: 2
             });
         }
         return res.json({ fulfillmentText, outputContexts });
