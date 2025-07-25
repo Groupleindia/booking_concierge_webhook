@@ -878,7 +878,114 @@ app.post("/webhook", async (req, res) => {
         console.log("DEBUG: Entering Default Fallback Intent.");
         // Check if there's an active booking context to provide more relevant fallback
         const bookingFlowCtx = findContext("booking-flow", contexts);
-        if (bookingFlowCtx) {
+        const awaitingContactDetailsCtx = findContext("awaiting-contact-details", contexts);
+
+        if (awaitingContactDetailsCtx && bookingFlowCtx) {
+            // If awaiting contact details, try to parse the current query as contact info
+            let currentBookingDetails = bookingFlowCtx.parameters;
+            let fullName = currentBookingDetails.full_name || '';
+            let mobileNumber = currentBookingDetails.mobile_number || '';
+            let emailAddress = currentBookingDetails.email_id || '';
+
+            // Attempt to extract from queryText if params are not set (Dialogflow fallback behavior)
+            const queryText = req.body.queryResult.queryText;
+            console.log(`DEBUG: Default Fallback Intent - Query text: "${queryText}"`);
+
+            // Simple regex to try and extract common patterns for name, email, phone
+            // This is a basic attempt and relies on specific patterns.
+            // For robust parsing, Dialogflow's entity extraction is preferred.
+            if (!fullName && queryText.match(/^[A-Za-z]+\s[A-Za-z]+$/)) { // Simple two-word name
+                fullName = queryText.trim();
+                console.log(`DEBUG: Extracted name from fallback: ${fullName}`);
+            }
+            if (!emailAddress && queryText.match(/\S+@\S+\.\S+/)) { // Basic email pattern
+                emailAddress = queryText.match(/\S+@\S+\.\S+/)[0];
+                console.log(`DEBUG: Extracted email from fallback: ${emailAddress}`);
+            }
+            if (!mobileNumber && queryText.match(/(\+\d{1,3}[- ]?)?\d{10,12}/)) { // Basic phone pattern
+                mobileNumber = queryText.match(/(\+\d{1,3}[- ]?)?\d{10,12}/)[0];
+                console.log(`DEBUG: Extracted phone from fallback: ${mobileNumber}`);
+            }
+
+            // Update bookingDetails in context for persistence
+            currentBookingDetails.full_name = fullName;
+            currentBookingDetails.mobile_number = mobileNumber;
+            currentBookingDetails.email_id = emailAddress;
+
+            let missingFields = [];
+            if (!fullName) missingFields.push("full name");
+            if (!mobileNumber) missingFields.push("mobile number");
+            if (!emailAddress) missingFields.push("email address");
+
+            let prompt;
+            if (missingFields.length === 0) {
+                // All details now collected, proceed to summary (mimic Capture Contact Details Intent's success path)
+                const { date, time } = formatDubai(currentBookingDetails.bookingUTC);
+                const venueName = currentBookingDetails.venue || "the selected venue";
+                let summaryText;
+                if (currentBookingDetails.type === 'group') {
+                    summaryText = `Alright, ${fullName}, let's summarize your group inquiry:\n`;
+                    summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+                    summaryText += `Date: ${date} at ${time}\n`;
+                    summaryText += `Venue: ${venueName}\n`;
+                    summaryText += `Email: ${currentBookingDetails.email_id}\n`;
+                    summaryText += `Mobile: ${currentBookingDetails.mobile_number}\n`;
+                    summaryText += `Is this all correct? (Yes/No)`;
+                } else { // It's a table booking (<10 guests)
+                    summaryText = `Alright, ${fullName}, let's summarize your table reservation:\n`;
+                    summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+                    summaryText += `Date: ${date} at ${time}\n`;
+                    summaryText += `Venue: ${venueName}\n`;
+                    summaryText += `Is this all correct? (Yes/No)`;
+                }
+                prompt = await generateGeminiReply(summaryText);
+                return res.json({
+                    fulfillmentText: prompt,
+                    outputContexts: [
+                        {
+                            name: `${session}/contexts/booking-flow`,
+                            lifespanCount: 5,
+                            parameters: currentBookingDetails
+                        },
+                        {
+                            name: `${session}/contexts/awaiting-final-confirmation`,
+                            lifespanCount: 2,
+                            parameters: {
+                                full_name: fullName,
+                                mobile_number: mobileNumber,
+                                email_id: emailAddress
+                            }
+                        },
+                        {
+                            name: `${session}/contexts/awaiting-contact-details`, // Clear this context
+                            lifespanCount: 0,
+                        }
+                    ]
+                });
+            } else {
+                // Still missing fields, re-prompt specifically
+                prompt = await generateGeminiReply(`I still need your ${missingFields.join(' and ')} to finalize the booking.`);
+                return res.json({
+                    fulfillmentText: prompt,
+                    outputContexts: [
+                        {
+                            name: `${session}/contexts/booking-flow`,
+                            lifespanCount: 5,
+                            parameters: currentBookingDetails
+                        },
+                        {
+                            name: `${session}/contexts/awaiting-contact-details`,
+                            lifespanCount: 2,
+                            parameters: { // Pass back what was collected to maintain state
+                                personName: fullName,
+                                phoneNumber: mobileNumber,
+                                emailAddress: emailAddress
+                            }
+                        }
+                    ]
+                });
+            }
+        } else if (bookingFlowCtx) {
             return res.json({ fulfillmentText: await generateGeminiReply("I'm sorry, I didn't understand that. Please tell me more about your booking preference or try rephrasing.") });
         } else {
             return res.json({ fulfillmentText: await generateGeminiReply("I didn't quite catch that. Could you please rephrase or tell me what you'd like to do?") });
