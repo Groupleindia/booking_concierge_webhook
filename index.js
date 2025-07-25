@@ -740,8 +740,7 @@ app.post("/webhook", async (req, res) => {
 
                 if (type === 'group') {
                     // MODIFIED: For group bookings, directly ask for contact details after venue selection
-                    // Removed any mention of packages as per user's request
-                    prompt = `Great! You've chosen ${match.name} for your group booking of ${guestCount} guests on ${date} at ${time}. To proceed, could I please get your full name, mobile number, and email address?`; // Removed "Our manager will be in touch to discuss package options."
+                    prompt = `Great! You've chosen ${match.name} for your group booking of ${guestCount} guests on ${date} at ${time}. Our manager will share pre-curated package options with you. To proceed, could I please get your full name, mobile number, and email address?`;
                     outputContexts.push({
                         name: `${session}/contexts/awaiting-contact-details`, // Direct to contact details
                         lifespanCount: 2,
