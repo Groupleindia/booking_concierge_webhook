@@ -549,12 +549,44 @@ app.post("/webhook", async (req, res) => {
     // ✅ Select Venue Intent
     if (intent === "Select Venue Intent") {
         console.log(`DEBUG: Entering Select Venue Intent.`);
-        const venueName = getParameter(req.body, 'venue_name'); // Use req.body for getParameter
+        let venueRaw = getParameter(req.body, 'venue_name'); // Use req.body for getParameter
+
+        // If venueRaw is empty, it means Dialogflow triggered this intent without a specific venue name.
+        if (!venueRaw || venueRaw.trim() === '') {
+            const bookingFlowCtx = findContext("booking-flow", contexts);
+            let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+            let prompt;
+
+            if (currentBookingDetails.guestCount && currentBookingDetails.bookingUTC) {
+                const { date, time } = formatDubai(currentBookingDetails.bookingUTC);
+                prompt = `Okay, for ${currentBookingDetails.guestCount} guests on ${date} at ${time}. Which venue are you interested in?`;
+            } else {
+                prompt = `Which venue are you interested in?`;
+            }
+
+            return res.json({
+                fulfillmentText: await generateGeminiReply(prompt),
+                outputContexts: [
+                    {
+                        name: `${session}/contexts/awaiting-venue-name`, // New context to explicitly await venue name
+                        lifespanCount: 2
+                    },
+                    // Keep booking-flow context if it exists
+                    ...(bookingFlowCtx ? [{
+                        name: `${session}/contexts/booking-flow`,
+                        lifespanCount: 5,
+                        parameters: bookingFlowCtx.parameters
+                    }] : [])
+                ]
+            });
+        }
+
+        // Proceed with original logic if venueRaw is not empty
         const bookingFlowCtx = findContext("booking-flow", contexts); // Use contexts from webhook scope
         let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
         const availableVenues = await getAvailableVenues(currentBookingDetails.guestCount); // Pass guestCount for filtering
-        const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueName.toLowerCase());
+        const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueRaw.toLowerCase());
 
         if (!selectedVenue) {
             return res.json({ fulfillmentText: await generateGeminiReply("I couldn't find that venue. Please select from the available venues.") });
