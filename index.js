@@ -37,6 +37,7 @@ app.use(express.json()); // Middleware to parse JSON request bodies
 // 🔹 Fetch venues from Airtable
 /**
  * Fetches available venues from Airtable based on guest count.
+ * MODIFIED: Now filters by seated_capacity instead of standing_capacity.
  * @param {number} guestCount - The number of guests for the booking.
  * @returns {Promise<Array<object>>} - An array of available venue objects.
  */
@@ -48,7 +49,7 @@ async function getAvailableVenues(guestCount) {
   try {
     const resp = await axios.get(url, cfg);
     return resp.data.records
-      .filter((r) => guestCount ? r.fields.standing_capacity >= guestCount : true) // Filter only if guestCount is provided
+      .filter((r) => guestCount ? r.fields.seated_capacity >= guestCount : true) // Filter by seated_capacity
       .map((r) => ({
         id: r.id, // Include venue ID
         name: r.fields.space_name,
@@ -136,7 +137,7 @@ async function generateGeminiReply(prompt) {
         parts: [
           {
             text: prompt +
-              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **When provided with a list of options, please list all of them clearly without filtering or making suggestions beyond what is explicitly asked.**',
+              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**',
           },
         ],
       },
@@ -363,11 +364,11 @@ app.post("/webhook", async (req, res) => {
             currentBookingDetails.bookingTime = bookingTimeStr; // Store formatted time
             currentBookingDetails.bookingUTC = bookingUTC;
 
-            const venues = await getAvailableVenues(guestCount);
+            const venues = await getAvailableVenues(guestCount); // Filtered by seated_capacity
             const venueNames = venues.map(v => v.name).join(', ');
 
-            // MODIFIED PROMPT: Explicitly ask Gemini to list all venues
-            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? We have: ${venueNames}. Please list all these available venues clearly to the user and ask them if any of these work for them.`);
+            // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid filtering
+            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask them if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`);
 
             outputContexts.push({
                 name: `${session}/contexts/booking-flow`,
@@ -555,12 +556,12 @@ app.post("/webhook", async (req, res) => {
         currentBookingDetails.bookingTime = bookingMoment.format('HH:mm');
         currentBookingDetails.bookingUTC = bookingMoment.toISOString();
 
-        const venues = await getAvailableVenues(currentBookingDetails.guestCount); // Pass guestCount for filtering
+        const venues = await getAvailableVenues(currentBookingDetails.guestCount); // Filtered by seated_capacity
         const venueNames = venues.map(v => v.name).join(', ');
 
-        // MODIFIED PROMPT: Explicitly ask Gemini to list all venues
+        // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid filtering
         return res.json({
-            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? We have: ${venueNames}. Please list all these available venues clearly to the user and ask them if any of these work for them.`),
+            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask them if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`),
             outputContexts: [
                 {
                     name: `${session}/contexts/booking-flow`,
@@ -573,6 +574,75 @@ app.post("/webhook", async (req, res) => {
                 }
             ]
         });
+    }
+
+    // ✅ Ask Venue Details Intent
+    if (intent === "Ask Venue Details Intent") { // Corrected intent name with spaces
+      console.log(`DEBUG: Entering Ask Venue Details Intent.`);
+      const venueRaw = getParameter(req.body, 'venue_name'); // Use getParameter for robustness
+
+      console.log(`DEBUG: Ask Venue Details Intent - venueRaw: ${venueRaw}`);
+
+      if (!venueRaw) {
+        console.log(`DEBUG: Ask Venue Details Intent - No venue name provided.`);
+        return res.json({
+          fulfillmentText: await generateGeminiReply(`I couldn't catch the venue name you're asking about. Could you please say it again?`),
+        });
+      }
+
+      const venueName = venueRaw.toLowerCase();
+      const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_VENUES_TABLE_ID}`;
+      const cfg = {
+        headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
+      };
+      let resp;
+      try {
+        resp = await axios.get(url, cfg);
+        console.log(`DEBUG: Ask Venue Details Intent - Fetched venues from Airtable.`);
+      } catch (error) {
+        console.error("❌ Ask Venue Details Intent - Error fetching venues from Airtable:", error.message);
+        return res.json({
+            fulfillmentText: await generateGeminiReply("There was a problem fetching venue details. Please try again.")
+        });
+      }
+
+      const match = resp.data.records.find(
+        (r) =>
+          r.fields.space_name &&
+          r.fields.space_name.toLowerCase() === venueName
+      );
+
+      if (!match) {
+        console.log(`DEBUG: Ask Venue Details Intent - No match found for venue: ${venueName}`);
+        return res.json({
+          fulfillmentText: await generateGeminiReply(`Sorry, I couldn't find details for "${venueRaw}". Please ensure you're asking about one of our listed venues.`),
+        });
+      }
+
+      const venue = match.fields;
+      // MODIFIED PROMPT FOR Ask Venue Details Intent - now includes both standing and seated capacity
+      const prompt = `The user asked for details about the venue "${venue.space_name}". It has a standing capacity of ${venue.standing_capacity} and a seated capacity of ${venue.seated_capacity}. Here is the description: ${venue.description || "No description provided."} As a helpful booking concierge, explain this information clearly to the user. Do NOT ask any follow up questions.`;
+
+      console.log(`DEBUG: Ask Venue Details Intent - Gemini prompt: ${prompt}`);
+      const reply = await generateGeminiReply(prompt);
+      console.log(`DEBUG: Ask Venue Details Intent - Gemini reply: ${reply}`);
+
+      // Set the venue name and ID in the booking-flow context
+      const bookingFlowCtx = findContext("booking-flow", contexts);
+      let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+      currentBookingDetails.venue = venue.space_name;
+      currentBookingDetails.space_id = match.id;
+
+      return res.json({ 
+        fulfillmentText: reply,
+        outputContexts: [
+          {
+            name: `${session}/contexts/booking-flow`,
+            lifespanCount: 5, 
+            parameters: currentBookingDetails, // Ensure updated parameters are passed
+          },
+        ],
+      });
     }
 
     // ✅ Select Venue Intent
@@ -614,7 +684,7 @@ app.post("/webhook", async (req, res) => {
         const bookingFlowCtx = findContext("booking-flow", contexts); // Use contexts from webhook scope
         let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-        const availableVenues = await getAvailableVenues(currentBookingDetails.guestCount); // Pass guestCount for filtering
+        const availableVenues = await getAvailableVenues(currentBookingDetails.guestCount); // Filtered by seated_capacity
         const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueRaw.toLowerCase());
 
         if (!selectedVenue) {
