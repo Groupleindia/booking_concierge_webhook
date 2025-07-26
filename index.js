@@ -784,10 +784,22 @@ app.post("/webhook", async (req, res) => {
             emailAddress = params.emailAddress;
         }
 
-        console.log(`DEBUG: Collected contact details (after update) - Name: ${fullName}, Phone: ${mobileNumber}, Email: ${emailAddress}`);
-        console.log(`DEBUG: fullName: '${fullName}' (Type: ${typeof fullName})`);
-        console.log(`DEBUG: mobileNumber: '${mobileNumber}' (Type: ${typeof mobileNumber})`);
-        console.log(`DEBUG: emailAddress: '${emailAddress}' (Type: ${typeof emailAddress})`);
+        // NEW: If personName parameter is still not set, try to extract from queryText
+        if (!fullName) {
+            const queryText = req.body.queryResult.queryText;
+            // More flexible regex for names (e.g., "John Doe", "Dr. Smith", "O'Malley")
+            // This regex attempts to capture common name formats, including optional titles.
+            const nameMatch = queryText.match(/^(?:(?:Dr|Mr|Mrs|Ms|Miss|Mister)\.?\s+)?([A-Za-z'-]+(?:\s+[A-Za-z'-]+)*)$/i);
+            console.log(`DEBUG: CollectContactDetails - queryText for name regex: "${queryText}"`);
+            console.log(`DEBUG: CollectContactDetails - nameMatch result: ${JSON.stringify(nameMatch)}`);
+            if (nameMatch && nameMatch[1]) {
+                fullName = nameMatch[1].trim();
+                console.log(`DEBUG: Extracted name from queryText in CollectContactDetails: ${fullName}`);
+            }
+        }
+
+
+        console.log(`DEBUG: Collected contact details (after update) - Name: '${fullName}' (Type: ${typeof fullName}), Phone: '${mobileNumber}' (Type: ${typeof mobileNumber}), Email: '${emailAddress}' (Type: ${typeof emailAddress})`);
 
 
         // Update bookingDetails in context for persistence
@@ -1033,19 +1045,24 @@ app.post("/webhook", async (req, res) => {
             const queryText = req.body.queryResult.queryText;
             console.log(`DEBUG: Default Fallback Intent - Query text: "${queryText}"`);
 
-            // Simple regex to try and extract common patterns for name, email, phone
-            // This is a basic attempt and relies on specific patterns.
-            // For robust parsing, Dialogflow's entity extraction is preferred.
-            if (!fullName && queryText.match(/^[A-Za-z]+\s[A-Za-z]+$/)) { // Simple two-word name
-                fullName = queryText.trim();
-                console.log(`DEBUG: Extracted name from fallback: ${fullName}`);
+            // More robust name extraction
+            if (!fullName) {
+                // This regex tries to capture common name formats, including titles and hyphenated names.
+                const nameRegex = /^(?:(?:Dr|Mr|Mrs|Ms|Miss|Mister)\.?\s+)?([A-Za-z'-]+(?:\s+[A-Za-z'-]+)*)$/i;
+                const nameMatch = queryText.match(nameRegex);
+                console.log(`DEBUG: Default Fallback Intent - nameRegex: ${nameRegex}`);
+                console.log(`DEBUG: Default Fallback Intent - nameMatch result: ${JSON.stringify(nameMatch)}`);
+                if (nameMatch && nameMatch[1]) {
+                    fullName = nameMatch[1].trim();
+                    console.log(`DEBUG: Extracted name from fallback: ${fullName}`);
+                }
             }
-            if (!emailAddress && queryText.match(/\S+@\S+\.\S+/)) { // Basic email pattern
-                emailAddress = queryText.match(/\S+@\S+\.\S+/)[0];
+            if (!emailAddress && queryText.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/)) { // More robust email pattern
+                emailAddress = queryText.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/)[0];
                 console.log(`DEBUG: Extracted email from fallback: ${emailAddress}`);
             }
-            if (!mobileNumber && queryText.match(/(\+\d{1,3}[- ]?)?\d{10,12}/)) { // Basic phone pattern
-                mobileNumber = queryText.match(/(\+\d{1,3}[- ]?)?\d{10,12}/)[0];
+            if (!mobileNumber && queryText.match(/(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/)) { // More robust phone pattern
+                mobileNumber = queryText.match(/(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/)[0];
                 console.log(`DEBUG: Extracted phone from fallback: ${mobileNumber}`);
             }
 
