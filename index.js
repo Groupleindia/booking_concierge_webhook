@@ -136,7 +136,7 @@ async function generateGeminiReply(prompt) {
         parts: [
           {
             text: prompt +
-              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise.',
+              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **When provided with a list of options, please list all of them clearly without filtering or making suggestions beyond what is explicitly asked.**',
           },
         ],
       },
@@ -366,7 +366,8 @@ app.post("/webhook", async (req, res) => {
             const venues = await getAvailableVenues(guestCount);
             const venueNames = venues.map(v => v.name).join(', ');
 
-            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? We have: ${venueNames}.`);
+            // MODIFIED PROMPT: Explicitly ask Gemini to list all venues
+            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? We have: ${venueNames}. Please list all these available venues clearly to the user and ask them if any of these work for them.`);
 
             outputContexts.push({
                 name: `${session}/contexts/booking-flow`,
@@ -557,8 +558,9 @@ app.post("/webhook", async (req, res) => {
         const venues = await getAvailableVenues(currentBookingDetails.guestCount); // Pass guestCount for filtering
         const venueNames = venues.map(v => v.name).join(', ');
 
+        // MODIFIED PROMPT: Explicitly ask Gemini to list all venues
         return res.json({
-            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? We have: ${venueNames}.`),
+            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? We have: ${venueNames}. Please list all these available venues clearly to the user and ask them if any of these work for them.`),
             outputContexts: [
                 {
                     name: `${session}/contexts/booking-flow`,
