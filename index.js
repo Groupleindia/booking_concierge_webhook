@@ -105,14 +105,14 @@ function getParameter(dialogflowRequest, paramName) {
     const queryResult = dialogflowRequest.queryResult;
     // Check parameters from the current intent
     if (queryResult.parameters && queryResult.parameters[paramName]) {
-        console.log(`DEBUG: Parameter '${paramName}' found in current intent parameters.`);
+        console.log(`DEBUG: Parameter '${paramName}' found in current intent parameters. Value: ${JSON.stringify(queryResult.parameters[paramName])}`); // Added value logging
         return queryResult.parameters[paramName];
     }
     // Check parameters from input contexts
     if (queryResult.outputContexts) {
         for (const context of queryResult.outputContexts) {
             if (context.parameters && context.parameters[paramName]) {
-                console.log(`DEBUG: Parameter '${paramName}' found in output context: ${context.name}.`);
+                console.log(`DEBUG: Parameter '${paramName}' found in output context: ${context.name}. Value: ${JSON.stringify(context.parameters[paramName])}`); // Added value logging
                 return context.parameters[paramName];
             }
         }
@@ -368,7 +368,7 @@ app.post("/webhook", async (req, res) => {
             const venueNames = venues.map(v => v.name).join(', ');
 
             // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid filtering
-            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask them if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`);
+            fulfillmentText = await generateGeminiReply(`Got it! For ${guestCount} guests, which implies a ${bookingType} booking, on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`);
 
             outputContexts.push({
                 name: `${session}/contexts/booking-flow`,
@@ -561,7 +561,7 @@ app.post("/webhook", async (req, res) => {
 
         // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid filtering
         return res.json({
-            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask them if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`),
+            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`),
             outputContexts: [
                 {
                     name: `${session}/contexts/booking-flow`,
@@ -579,9 +579,18 @@ app.post("/webhook", async (req, res) => {
     // ✅ Ask Venue Details Intent
     if (intent === "Ask Venue Details Intent") { // Corrected intent name with spaces
       console.log(`DEBUG: Entering Ask Venue Details Intent.`);
-      const venueRaw = getParameter(req.body, 'venue_name'); // Use getParameter for robustness
+      // Corrected to use 'space_name'
+      let venueRaw = getParameter(req.body, 'space_name'); 
+      if (Array.isArray(venueRaw)) {
+          venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
+      }
+      if (typeof venueRaw === 'object' && venueRaw !== null && venueRaw.name) {
+          venueRaw = venueRaw.name; // If it's an object with a 'name' property
+      }
+      // Ensure venueRaw is definitely a string before proceeding
+      venueRaw = String(venueRaw || '').trim(); 
 
-      console.log(`DEBUG: Ask Venue Details Intent - venueRaw: ${venueRaw}`);
+      console.log(`DEBUG: Ask Venue Details Intent - venueRaw (after string conversion and trim): '${venueRaw}' (type: ${typeof venueRaw})`);
 
       if (!venueRaw) {
         console.log(`DEBUG: Ask Venue Details Intent - No venue name provided.`);
@@ -590,7 +599,17 @@ app.post("/webhook", async (req, res) => {
         });
       }
 
-      const venueName = venueRaw.toLowerCase();
+      // Add an explicit check and conversion just before toLowerCase, as a final safeguard
+      let venueName = '';
+      if (typeof venueRaw === 'string') {
+          venueName = venueRaw.toLowerCase();
+      } else {
+          console.error(`CRITICAL ERROR: venueRaw is not a string before toLowerCase in Ask Venue Details Intent: ${venueRaw} (type: ${typeof venueRaw})`);
+          return res.json({
+              fulfillmentText: await generateGeminiReply("There was an unexpected issue with the venue name. Please try again.")
+          });
+      }
+
       const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_VENUES_TABLE_ID}`;
       const cfg = {
         headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` },
@@ -648,7 +667,19 @@ app.post("/webhook", async (req, res) => {
     // ✅ Select Venue Intent
     if (intent === "Select Venue Intent") {
         console.log(`DEBUG: Entering Select Venue Intent.`);
-        let venueRaw = getParameter(req.body, 'venue_name'); // Use req.body for getParameter
+        // Corrected to use 'space_name'
+        let venueRaw = getParameter(req.body, 'space_name'); 
+        if (Array.isArray(venueRaw)) {
+            venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
+        }
+        if (typeof venueRaw === 'object' && venueRaw !== null && venueRaw.name) {
+            venueRaw = venueRaw.name; // If it's an object with a 'name' property
+        }
+        // Ensure venueRaw is definitely a string before proceeding
+        venueRaw = String(venueRaw || '').trim(); 
+
+        console.log(`DEBUG: Select Venue Intent - venueRaw (after string conversion and trim): '${venueRaw}' (type: ${typeof venueRaw})`);
+
 
         // If venueRaw is empty, it means Dialogflow triggered this intent without a specific venue name.
         if (!venueRaw || venueRaw.trim() === '') {
@@ -680,12 +711,23 @@ app.post("/webhook", async (req, res) => {
             });
         }
 
+        // Add an explicit check and conversion just before toLowerCase, as a final safeguard
+        let venueName = '';
+        if (typeof venueRaw === 'string') {
+            venueName = venueRaw.toLowerCase();
+        } else {
+            console.error(`CRITICAL ERROR: venueRaw is not a string before toLowerCase in Select Venue Intent: ${venueRaw} (type: ${typeof venueRaw})`);
+            return res.json({
+                fulfillmentText: await generateGeminiReply("There was an unexpected issue with the venue name. Please try again.")
+            });
+        }
+
         // Proceed with original logic if venueRaw is not empty
         const bookingFlowCtx = findContext("booking-flow", contexts); // Use contexts from webhook scope
         let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
         const availableVenues = await getAvailableVenues(currentBookingDetails.guestCount); // Filtered by seated_capacity
-        const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueRaw.toLowerCase());
+        const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueName.toLowerCase());
 
         if (!selectedVenue) {
             return res.json({ fulfillmentText: await generateGeminiReply("I couldn't find that venue. Please select from the available venues.") });
@@ -827,7 +869,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         return res.json({
-            fulfillmentText: finalConfirmationPrompt, // Use the Gemini-generated prompt
+            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
             outputContexts: outputContexts
         });
     }
@@ -911,7 +953,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         return res.json({
-            fulfillmentText: finalConfirmationPrompt, // Use the Gemini-generated prompt
+            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
             outputContexts: outputContextsToSet
         });
     }
