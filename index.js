@@ -681,20 +681,43 @@ app.post("/webhook", async (req, res) => {
 
         console.log(`DEBUG: Select Venue Intent - venueRaw (after string conversion and trim): '${venueRaw}' (type: ${typeof venueRaw})`);
 
+        const bookingFlowCtx = findContext("booking-flow", contexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
 
-        // If venueRaw is empty, it means Dialogflow triggered this intent without a specific venue name.
-        if (!venueRaw || venueRaw.trim() === '') {
-            const bookingFlowCtx = findContext("booking-flow", contexts);
-            let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+        // NEW LOGIC: If venueRaw is empty, but a venue is already selected in context,
+        // then the user is likely trying to confirm or move on from venue selection.
+        // We should then proceed to ask for contact details.
+        if ((!venueRaw || venueRaw.trim() === '') && currentBookingDetails.venue) {
+            console.log("DEBUG: Select Venue Intent - venueRaw empty, but venue already in context. Skipping re-prompt for venue.");
+            return res.json({
+                fulfillmentText: await generateGeminiReply(`Great! You've chosen ${currentBookingDetails.venue}. Now, could I get your full name, email, and phone number to finalize your inquiry?`),
+                outputContexts: [
+                    {
+                        name: `${session}/contexts/booking-flow`,
+                        lifespanCount: 5,
+                        parameters: currentBookingDetails
+                    },
+                    {
+                        name: `${session}/contexts/awaiting-contact-details`, // Direct to contact details
+                        lifespanCount: 2
+                    },
+                    {
+                        name: `${session}/contexts/awaiting-venue-selection`, // Clear this context
+                        lifespanCount: 0
+                    }
+                ]
+            });
+        }
+
+        // OLD LOGIC (for when venueRaw is truly empty and no venue is in context)
+        if (!venueRaw || venueRaw.trim() === '') { // This block will now only hit if no venue is in context either
             let prompt;
-
             if (currentBookingDetails.guestCount && currentBookingDetails.bookingUTC) {
                 const { date, time } = formatDubai(currentBookingDetails.bookingUTC);
                 prompt = `Okay, for ${currentBookingDetails.guestCount} guests on ${date} at ${time}. Which venue are you interested in?`;
             } else {
                 prompt = `Which venue are you interested in?`;
             }
-
             return res.json({
                 fulfillmentText: await generateGeminiReply(prompt),
                 outputContexts: [
@@ -724,8 +747,8 @@ app.post("/webhook", async (req, res) => {
         }
 
         // Proceed with original logic if venueRaw is not empty
-        const bookingFlowCtx = findContext("booking-flow", contexts); // Use contexts from webhook scope
-        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+        // The bookingFlowCtx is already defined above
+        // let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {}; // This line is redundant now
 
         const availableVenues = await getAvailableVenues(currentBookingDetails.guestCount); // Filtered by seated_capacity
         const selectedVenue = availableVenues.find(v => v.name.toLowerCase() === venueName.toLowerCase());
@@ -789,7 +812,7 @@ app.post("/webhook", async (req, res) => {
             const queryText = req.body.queryResult.queryText;
             // More flexible regex for names (e.g., "John Doe", "Dr. Smith", "O'Malley")
             // This regex attempts to capture common name formats, including optional titles.
-            const nameMatch = queryText.match(/^(?:(?:Dr|Mr|Mrs|Ms|Miss|Mister)\.?\s+)?([A-Za-z'-]+(?:\s+[A-Za-z'-]+)*)$/i);
+            const nameRegex = /^(?:(?:Dr|Mr|Mrs|Ms|Miss|Mister)\.?\s+)?([A-Za-z'-]+(?:\s+[A-Za-z'-]+)*)$/i;
             console.log(`DEBUG: CollectContactDetails - queryText for name regex: "${queryText}"`);
             console.log(`DEBUG: CollectContactDetails - nameMatch result: ${JSON.stringify(nameMatch)}`);
             if (nameMatch && nameMatch[1]) {
