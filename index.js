@@ -579,8 +579,9 @@ app.post("/webhook", async (req, res) => {
     // ✅ Ask Venue Details Intent
     if (intent === "Ask Venue Details Intent") { // Corrected intent name with spaces
       console.log(`DEBUG: Entering Ask Venue Details Intent.`);
-      // Corrected to use 'space_name'
-      let venueRaw = getParameter(req.body, 'space_name'); 
+      // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
+      let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
+
       if (Array.isArray(venueRaw)) {
           venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
       }
@@ -667,8 +668,8 @@ app.post("/webhook", async (req, res) => {
     // ✅ Select Venue Intent
     if (intent === "Select Venue Intent") {
         console.log(`DEBUG: Entering Select Venue Intent.`);
-        // Corrected to use 'space_name'
-        let venueRaw = getParameter(req.body, 'space_name'); 
+        // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
+        let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
         if (Array.isArray(venueRaw)) {
             venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
         }
