@@ -256,22 +256,23 @@ async function createBooking(bookingDetails, status) {
     };
 
     const now = moment();
-    const storageTimeUtc = now.toISOString(); // ISO string for UTC storage time
+    // const storageTimeUtc = now.toISOString(); // Removed: This field is computed in Airtable
 
     const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventTimeLocal } = formatDubai(bookingDetails.bookingUTC);
-    const eventDateTime = `${formattedBookingDate} ${formattedBookingTime}`; // e.g., "5 July 2025 8:30pm"
+    const eventDateTime = `${formattedBookingDate} ${formattedBookingTime}`; // e.g., "Wednesday, 2 July 9:00 PM"
 
     // Prepare fields for Airtable
     const fields = {
       guest_name: bookingDetails.full_name,
       phone_no: bookingDetails.mobile_number,
       email: bookingDetails.email_id,
-      booking_type: bookingDetails.type === 'table' ? 'Table Booking' : 'Group Booking', // Map 'type' to 'booking_type'
+      // MODIFIED: 'Table Booking' changed to 'General Reservation'
+      booking_type: bookingDetails.type === 'table' ? 'General Reservation' : 'Group Booking', 
       event_date_time: eventDateTime, // Combined date and time string
       guest_count: bookingDetails.guestCount, // Corrected from guest_count to guestCount
       "Status": status, // CHANGED: From 'Booking Status' to 'Status' to match CSV
-      event_time_local: eventTimeLocal, // Local Dubai time
-      storage_time_utc: storageTimeUtc, // UTC time of storage
+      event_time_local: eventTimeLocal, // Local Dubai time in YYYY-MM-DD HH:mm:ss
+      // storage_time_utc: storageTimeUtc, // Removed: This field is computed in Airtable
     };
 
     // Add venue details
