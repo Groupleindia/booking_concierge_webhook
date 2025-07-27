@@ -260,7 +260,7 @@ async function createBooking(bookingDetails, status) {
     const now = moment();
     // const storageTimeUtc = now.toISOString(); // Removed: This field is computed in Airtable
 
-    const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventTimeLocal } = formatDubai(bookingDetails.bookingUTC);
+      const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventDateTimeLocal } = formatDubai(bookingDetails.bookingUTC);
     const eventDateTime = `${formattedBookingDate} ${formattedBookingTime}`; // e.g., "Wednesday, 2 July 9:00 PM"
 
     // Prepare fields for Airtable
@@ -270,10 +270,10 @@ async function createBooking(bookingDetails, status) {
       email: bookingDetails.email_id,
       // MODIFIED: 'Table Booking' changed to 'General Reservation'
       booking_type: bookingDetails.type === 'table' ? 'General Reservation' : 'Group Booking',
-        event_date_time_local: eventDateTimeLocal, // Combined date and time string
+      event_date_time: eventDateTime, // Combined date and time string
       guest_count: bookingDetails.guestCount, // Corrected from guest_count to guestCount
       "Status": status, // CHANGED: From 'Booking Status' to 'Status' to match CSV
-        event_date_time_local: eventDateTimeLocal, // Local Dubai time in YYYY-MM-DD HH:mm:ss
+      event_time_local: eventTimeLocal, // Local Dubai time in YYYY-MM-DD HH:mm:ss
       // storage_time_utc: storageTimeUtc, // Removed: This field is computed in Airtable
     };
 
@@ -1004,7 +1004,7 @@ app.post("/webhook", async (req, res) => {
 }); // CLOSING BRACE FOR app.post CALLBACK
 
 // --- Start the Server ---
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
