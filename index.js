@@ -138,7 +138,8 @@ async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
       toneInstruction = '\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**';
   } else {
       // General tone instruction
-      toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**';
+      // STRONGER NEGATIVE CONSTRAINT ADDED HERE
+      toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**';
   }
 
   const payload = {
