@@ -273,7 +273,7 @@ async function createBooking(bookingDetails, status) {
       event_date_time: eventDateTime, // Combined date and time string
       guest_count: bookingDetails.guestCount, // Corrected from guest_count to guestCount
       "Status": status, // CHANGED: From 'Booking Status' to 'Status' to match CSV
-      event_time_local: eventTimeLocal, // Local Dubai time in YYYY-MM-DD HH:mm:ss
+     event_date_time_local: eventDateTimeLocal, // Local Dubai time in YYYY-MM-DD HH:mm:ss
       // storage_time_utc: storageTimeUtc, // Removed: This field is computed in Airtable
     };
 
