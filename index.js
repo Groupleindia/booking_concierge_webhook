@@ -254,8 +254,9 @@ async function createBooking(bookingDetails, status) {
       }
     };
 
+    // REMOVED: created_date: formattedCreatedDate, // This field is computed in Airtable, do not send
     const now = moment();
-    const formattedCreatedDate = now.format("M/D/YYYY h:mma"); // e.g., "6/25/2025 3:45pm"
+    // const formattedCreatedDate = now.format("M/D/YYYY h:mma"); // This is no longer needed to send to Airtable
     const storageTimeUtc = now.toISOString(); // ISO string for UTC storage time
 
     const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventTimeLocal } = formatDubai(bookingDetails.bookingUTC);
@@ -263,7 +264,7 @@ async function createBooking(bookingDetails, status) {
 
     // Prepare fields for Airtable
     const fields = {
-      created_date: formattedCreatedDate,
+      // created_date: formattedCreatedDate, // REMOVED THIS LINE
       guest_name: bookingDetails.full_name,
       phone_no: bookingDetails.mobile_number,
       email: bookingDetails.email_id,
@@ -680,7 +681,7 @@ app.post("/webhook", async (req, res) => {
         // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
         let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
         if (Array.isArray(venueRaw)) {
-            venueRaw = venueRaw[venue.length - 1]; // Take the last element if it's an array
+            venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
         }
         if (typeof venueRaw === 'object' && venueRaw !== null && venueRaw.name) {
             venueRaw = venueRaw.name; // If it's an object with a 'name' property
