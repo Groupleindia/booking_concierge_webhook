@@ -126,13 +126,20 @@ function getParameter(dialogflowRequest, paramName) {
  * Calls the Gemini API to generate natural language responses.
  * Adds a specific tone instruction to the prompt.
  * @param {string} prompt - The prompt to send to the Gemini API.
+ * @param {boolean} [isSummaryConfirmation=false] - If true, adjusts tone for summary confirmation.
  * @returns {Promise<string>} - The generated text response.
  */
-async function generateGeminiReply(prompt) {
+async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
-  // Always use the detailed tone instruction for general responses
-  const toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**';
+  let toneInstruction;
+  if (isSummaryConfirmation) {
+      // For summary, explicitly tell Gemini to reiterate and then ask for confirmation
+      toneInstruction = '\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**';
+  } else {
+      // General tone instruction
+      toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**';
+  }
 
   const payload = {
     contents: [
@@ -873,7 +880,8 @@ app.post("/webhook", async (req, res) => {
                 summaryText += `Is this all correct? (Yes/No)`;
             }
 
-            finalConfirmationPrompt = await generateGeminiReply(summaryText); // Use Gemini for the summary prompt
+            // Pass isSummaryConfirmation = true to generateGeminiReply
+            finalConfirmationPrompt = await generateGeminiReply(summaryText, true); 
 
             outputContexts.push({
                 name: `${session}/contexts/awaiting-final-confirmation`, // New context to await final confirmation
@@ -912,11 +920,15 @@ app.post("/webhook", async (req, res) => {
                 }
             });
         }
-
-        return res.json({
+        // --- NEW LOGGING FOR WEBHOOK RESPONSE ---
+        const webhookResponse = {
             fulfillmentText: finalConfirmationPrompt,
             outputContexts: outputContexts
-        });
+        };
+        console.log(`DEBUG: Webhook response for CollectContactDetails: ${JSON.stringify(webhookResponse, null, 2)}`);
+        // --- END NEW LOGGING ---
+
+        return res.json(webhookResponse);
     }
 
     // Removed duplicate formatDubai function from here.
