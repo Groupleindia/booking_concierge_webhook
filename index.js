@@ -138,8 +138,7 @@ async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
       toneInstruction = '\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**';
   } else {
       // General tone instruction
-      // STRONGER NEGATIVE CONSTRAINT ADDED HERE
-      toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**';
+      toneInstruction = '\n\nTone: You are the official booking concierge for the venue. Use a warm, professional, and helpful voice. Speak directly to the user. Do NOT use phrases like "Here's what I know," "It sounds like," or "I understand." Avoid emojis, technical terms, and overly conversational fillers. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**';
   }
 
   const payload = {
@@ -244,7 +243,7 @@ async function sendEmailWithPdf(recipientEmail, recipientName) {
  * @param {object} bookingDetails - Object containing all booking and customer details.
  * @param {string} status - The status to set for the booking (e.g., 'Confirmed', 'New Lead').
  * @returns {Promise<object>} - The created record from Airtable.
- */
+*/
 async function createBooking(bookingDetails, status) {
   try {
     const url = `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_BOOKINGS_TABLE_ID}`;
