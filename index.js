@@ -680,7 +680,7 @@ app.post("/webhook", async (req, res) => {
         // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
         let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
         if (Array.isArray(venueRaw)) {
-            venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
+            venueRaw = venueRaw[venue.length - 1]; // Take the last element if it's an array
         }
         if (typeof venueRaw === 'object' && venueRaw !== null && venueRaw.name) {
             venueRaw = venueRaw.name; // If it's an object with a 'name' property
@@ -931,8 +931,62 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-    // Removed duplicate formatDubai function from here.
-    // The one at the top is used.
+    // ✅ Confirm Booking Intent (NEW HANDLER)
+    if (intent === "ConfirmBooking") {
+        console.log(`DEBUG: Entering ConfirmBooking Intent.`);
+        const bookingFlowCtx = findContext("booking-flow", contexts);
+
+        if (!bookingFlowCtx || !bookingFlowCtx.parameters) {
+            console.error("❌ ConfirmBooking: booking-flow context or its parameters not found.");
+            return res.json({
+                fulfillmentText: await generateGeminiReply("I apologize, I seem to have lost track of your booking details. Could you please start over?")
+            });
+        }
+
+        const bookingDetails = bookingFlowCtx.parameters;
+        console.log(`DEBUG: ConfirmBooking: Retrieved booking details from context: ${JSON.stringify(bookingDetails, null, 2)}`);
+
+        // Perform booking creation in Airtable
+        try {
+            await createBooking(bookingDetails, 'Confirmed'); // Set status to 'Confirmed'
+            console.log("DEBUG: Booking successfully created in Airtable.");
+
+            let confirmationMessage;
+            if (bookingDetails.type === 'group') {
+                // For group bookings, send email and provide specific confirmation
+                const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
+                if (emailSent) {
+                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
+                } else {
+                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly. (Note: There was an issue sending the email with packages, please check your webhook logs.)`;
+                }
+            } else {
+                // For table bookings, provide simple confirmation
+                confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
+            }
+
+            return res.json({
+                fulfillmentText: await generateGeminiReply(confirmationMessage),
+                outputContexts: [
+                    {
+                        name: `${session}/contexts/booking-flow`,
+                        lifespanCount: 0 // Clear booking-flow context to end the session
+                    },
+                    {
+                        name: `${session}/contexts/awaiting-final-confirmation`,
+                        lifespanCount: 0 // Clear this context as well
+                    }
+                ]
+            });
+
+        } catch (error) {
+            console.error("❌ Error confirming booking:", error.message);
+            return res.json({
+                fulfillmentText: await generateGeminiReply("I'm sorry, there was an issue confirming your booking. Please try again later or contact us directly.")
+            });
+        }
+    }
+
 
     // If intent is not handled (this line will be hit if no specific intent handler above matches)
     return res.json({
