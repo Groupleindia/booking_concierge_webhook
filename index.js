@@ -26,7 +26,7 @@ app.use(express.json()); // Middleware to parse JSON request bodies
 // BASE_ID=YOUR_AIRTABLE_BASE_ID (e.g., appXXXXXXXXXXXXXX)
 // AIRTABLE_TOKEN=YOUR_AIRTABLE_API_KEY (e.g., patXXXXXXXXXXXXXX)
 // AIRTABLE_VENUES_TABLE_ID=YOUR_VENTABLE_ID (e.g., tblXXXXXXXXXXXXXX - from your "Venues" table)
-// AIRTABLE_BOOKINGS_TABLE_ID=YOUR_BOOKINGS_TABLE_ID (e.g., tblAAAAAAAAAAAAAA - from your "Bookings" table)
+// AIRTABLE_BOOKINGS_TABLE_ID=YOUR_BOOKTABLE_ID (e.g., tblAAAAAAAAAAAAAA - from your "Bookings" table)
 // GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 // EMAIL_SERVICE_HOST=smtp.zoho.com
 // EMAIL_SERVICE_PORT=587
@@ -131,13 +131,15 @@ function getParameter(dialogflowRequest, paramName) {
 async function generateGeminiReply(prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
+  // Always use the detailed tone instruction for general responses
+  const toneInstruction = '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**';
+
   const payload = {
     contents: [
       {
         parts: [
           {
-            text: prompt +
-              '\n\nTone: Use a warm, conversational voice as if this was spoken on a call. Be helpful and clear. Avoid emojis and technical terms. Be concise. **IMPORTANT: When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering, summarizing, or making any unrequested suggestions or follow-up questions about preferences (e.g., "vibe"). Just present the list and ask if any work.**',
+            text: prompt + toneInstruction,
           },
         ],
       },
@@ -269,8 +271,8 @@ async function createBooking(bookingDetails, status) {
     // Add venue details
     if (bookingDetails.venue) {
       fields.space_name = bookingDetails.venue; // Matches CSV 'space_name'
-      if (bookingDetails.space_id) {
-        fields.space_id = [bookingDetails.space_id]; // Ensure this is an array for linked records
+      if (bookingDetails.venue_id) { // Corrected from space_id to venue_id as per context
+        fields.space_id = [bookingDetails.venue_id]; // Ensure this is an array for linked records
       }
     }
 
@@ -561,7 +563,7 @@ app.post("/webhook", async (req, res) => {
 
         // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid filtering
         return res.json({
-            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${currentBookingDetails.bookingDate} at ${currentBookingDetails.bookingTime}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`),
+            fulfillmentText: await generateGeminiReply(`Got it! For ${currentBookingDetails.guestCount} guests on ${formatDubai(currentBookingDetails.bookingUTC).date} at ${formatDubai(currentBookingDetails.bookingUTC).time}. Which venue would you like to book? Here are our options: ${venueNames}. Please list ALL of these options clearly to the user and ask if any of these work for them. Do NOT filter or ask about preferences like 'vibe'.`),
             outputContexts: [
                 {
                     name: `${session}/contexts/booking-flow`,
@@ -651,7 +653,7 @@ app.post("/webhook", async (req, res) => {
       const bookingFlowCtx = findContext("booking-flow", contexts);
       let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
       currentBookingDetails.venue = venue.space_name;
-      currentBookingDetails.space_id = match.id;
+      currentBookingDetails.venue_id = match.id; // Store venue ID here
 
       return res.json({ 
         fulfillmentText: reply,
@@ -758,9 +760,9 @@ app.post("/webhook", async (req, res) => {
         }
 
         currentBookingDetails.venue = selectedVenue.name;
-        currentBookingDetails.venue_id = selectedVenue.id;
+        currentBookingDetails.venue_id = selectedVenue.id; // Store venue ID here
 
-        // MODIFIED: For both table and group, now directly ask for contact details
+        // CORRECTED: For both table and group bookings, now directly ask for contact details
         return res.json({
             fulfillmentText: await generateGeminiReply(`Great! You've chosen ${selectedVenue.name}. Now, could I get your full name, email, and phone number to finalize your inquiry?`),
             outputContexts: [
@@ -907,7 +909,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         return res.json({
-            fulfillmentText: finalConfirmationPrompt, // CORRECTED: Removed duplicate generateGeminiReply call
+            fulfillmentText: finalConfirmationPrompt,
             outputContexts: outputContexts
         });
     }
@@ -923,7 +925,8 @@ app.post("/webhook", async (req, res) => {
 
         const bookingDetails = bookingFlowCtx.parameters;
 
-        let finalConfirmationPrompt;
+        let finalConfirmationMessage; // Renamed to avoid confusion with Gemini prompt
+
         let outputContextsToSet = [];
 
         // Now both types use createBooking, but with different statuses and data.
@@ -932,24 +935,24 @@ app.post("/webhook", async (req, res) => {
                 // Create full booking record with 'Confirmed' status
                 const createdBookingRecord = await createBooking(bookingDetails, 'Confirmed');
 
-                // Generate confirmation message for table booking
+                // Generate confirmation message for table booking directly
                 const { date, time } = formatDubai(bookingDetails.bookingUTC);
                 const venueName = bookingDetails.venue || "the selected venue";
 
-                finalConfirmationPrompt = await generateGeminiReply(`Excellent, ${bookingDetails.full_name}! Your table reservation for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time} is now confirmed! A confirmation email will be sent to ${bookingDetails.email_id}. Thank you!`);
+                finalConfirmationMessage = `Excellent, ${bookingDetails.full_name}! Your table reservation for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time} is now confirmed! A confirmation email will be sent to ${bookingDetails.email_id}. Thank you!`;
 
                 outputContextsToSet = [
                     { name: `${session}/contexts/booking-finalized`, lifespanCount: 1 },
                     { name: `${session}/contexts/booking-flow`, lifespanCount: 0 },
-                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                    { name: `${session}/contexts/awaiting-final-confirmation`, lifespanCount: 0 } // Clear this context
                 ];
 
             } catch (error) {
                 console.error("❌ Confirm Booking Intent (Table) - Error finalizing booking:", error.message);
-                finalConfirmationPrompt = await generateGeminiReply("I'm sorry, there was an issue finalizing your table reservation. Please try again or contact us directly.");
+                finalConfirmationMessage = await generateGeminiReply("I'm sorry, there was an issue finalizing your table reservation. Please try again or contact us directly.");
                 outputContextsToSet = [
                     { name: `${session}/contexts/booking-flow`, lifespanCount: 2 },
-                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                    { name: `${session}/contexts/awaiting-final-confirmation`, lifespanCount: 0 } // Clear this context
                 ];
             }
         } else if (bookingDetails.type === 'group') {
@@ -962,36 +965,36 @@ app.post("/webhook", async (req, res) => {
                 const venueName = bookingDetails.venue || "the selected venue";
 
                 if (emailSent) {
-                    finalConfirmationPrompt = await generateGeminiReply(`Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We've just sent an email to ${bookingDetails.email_id} with our package details. Our manager will be in touch shortly to help you finalize your selection. Is there anything else I can help you with today?`);
+                    finalConfirmationMessage = `Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We've just sent an email to ${bookingDetails.email_id} with our package details. Our manager will be in touch shortly to help you finalize your selection. Is there anything else I can help you with today?`;
                 } else {
-                    finalConfirmationPrompt = await generateGeminiReply(`Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We're having trouble sending the package details via email right now, but our manager will be in touch shortly to help you finalize your selection.`);
+                    finalConfirmationMessage = `Thank you, ${bookingDetails.full_name}! We've received your group booking inquiry for ${bookingDetails.guestCount} guests at ${venueName} on ${date} at ${time}. We're having trouble sending the package details via email right now, but our manager will be in touch shortly to help you finalize your selection.`;
                 }
 
                 outputContextsToSet = [
                     { name: `${session}/contexts/group-lead-submitted`, lifespanCount: 1 }, // New context for lead submitted
                     { name: `${session}/contexts/booking-flow`, lifespanCount: 0 }, // Clear main context
-                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 } // Clear previous confirmation context
+                    { name: `${session}/contexts/awaiting-final-confirmation`, lifespanCount: 0 } // Clear previous confirmation context
                 ];
 
             } catch (error) {
                 console.error("❌ Confirm Booking Intent (Group) - Error submitting group lead or sending email:", error.message);
-                finalConfirmationPrompt = await generateGeminiReply("I'm sorry, there was an issue submitting your group inquiry. Please try again or contact us directly.");
+                finalConfirmationMessage = await generateGeminiReply("I'm sorry, there was an issue submitting your group inquiry. Please try again or contact us directly.");
                 outputContextsToSet = [
                     { name: `${session}/contexts/booking-flow`, lifespanCount: 2 },
-                    { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                    { name: `${session}/contexts/awaiting-final-confirmation`, lifespanCount: 0 } // Clear this context
                 ];
             }
         } else {
             // Fallback if booking type is somehow missing or invalid
-            finalConfirmationPrompt = await generateGeminiReply("I'm sorry, I couldn't determine the booking type. Please try again.");
+            finalConfirmationMessage = await generateGeminiReply("I'm sorry, I couldn't determine the booking type. Please try again.");
             outputContextsToSet = [
                 { name: `${session}/contexts/booking-flow`, lifespanCount: 0 },
-                { name: `${session}/contexts/awaiting-confirmation`, lifespanCount: 0 }
+                { name: `${session}/contexts/awaiting-final-confirmation`, lifespanCount: 0 }
             ];
         }
 
         return res.json({
-            fulfillmentText: finalConfirmationPrompt, // CORRECTED: Removed duplicate generateGeminiReply call
+            fulfillmentText: finalConfirmationMessage, // Directly return the constructed message
             outputContexts: outputContextsToSet
         });
     }
@@ -1007,7 +1010,7 @@ app.post("/webhook", async (req, res) => {
                     lifespanCount: 0,
                 },
                 {
-                    name: `${session}/contexts/awaiting-confirmation`, // Clear this context
+                    name: `${session}/contexts/awaiting-final-confirmation`, // Clear this context
                     lifespanCount: 0,
                 },
                 {
