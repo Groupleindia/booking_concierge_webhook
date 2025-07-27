@@ -288,7 +288,7 @@ async function createBooking(bookingDetails, status) {
     // Explicitly set package and add-on related fields to null for ALL bookings
     fields.package_name = null;
     fields.package_id = null;
-    fields.selected_add_ons = null;
+    fields.booking_addons = null;
     fields.grand_total = null; // No grand total calculated by bot anymore
 
     const data = { records: [{ fields }] };
