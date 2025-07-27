@@ -254,9 +254,7 @@ async function createBooking(bookingDetails, status) {
       }
     };
 
-    // REMOVED: created_date: formattedCreatedDate, // This field is computed in Airtable, do not send
     const now = moment();
-    // const formattedCreatedDate = now.format("M/D/YYYY h:mma"); // This is no longer needed to send to Airtable
     const storageTimeUtc = now.toISOString(); // ISO string for UTC storage time
 
     const { date: formattedBookingDate, time: formattedBookingTime, local_datetime: eventTimeLocal } = formatDubai(bookingDetails.bookingUTC);
@@ -264,14 +262,13 @@ async function createBooking(bookingDetails, status) {
 
     // Prepare fields for Airtable
     const fields = {
-      // created_date: formattedCreatedDate, // REMOVED THIS LINE
       guest_name: bookingDetails.full_name,
       phone_no: bookingDetails.mobile_number,
       email: bookingDetails.email_id,
       booking_type: bookingDetails.type === 'table' ? 'Table Booking' : 'Group Booking', // Map 'type' to 'booking_type'
       event_date_time: eventDateTime, // Combined date and time string
       guest_count: bookingDetails.guestCount, // Corrected from guest_count to guestCount
-      status: status, // Use the passed status
+      "Status": status, // CHANGED: From 'Booking Status' to 'Status' to match CSV
       event_time_local: eventTimeLocal, // Local Dubai time
       storage_time_utc: storageTimeUtc, // UTC time of storage
     };
