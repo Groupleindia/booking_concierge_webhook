@@ -907,7 +907,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         return res.json({
-            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
+            fulfillmentText: finalConfirmationPrompt, // CORRECTED: Removed duplicate generateGeminiReply call
             outputContexts: outputContexts
         });
     }
@@ -991,7 +991,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         return res.json({
-            fulfillmentText: await generateGeminiReply(finalConfirmationPrompt),
+            fulfillmentText: finalConfirmationPrompt, // CORRECTED: Removed duplicate generateGeminiReply call
             outputContexts: outputContextsToSet
         });
     }
@@ -1051,11 +1051,140 @@ app.post("/webhook", async (req, res) => {
         });
     }
 
+    // ✅ Default Fallback Intent handler (MODIFIED: Now includes contact details extraction)
+    if (intent === "Default Fallback Intent") {
+        console.log("DEBUG: Entering Default Fallback Intent.");
+        const awaitingContactDetailsCtx = findContext("awaiting-contact-details", contexts);
+        const bookingFlowCtx = findContext("booking-flow", contexts);
+        let currentBookingDetails = bookingFlowCtx ? bookingFlowCtx.parameters : {};
+        const queryText = req.body.queryResult.queryText;
+
+        if (awaitingContactDetailsCtx) {
+            console.log("DEBUG: Default Fallback Intent - awaiting-contact-details context is active.");
+
+            let fullName = currentBookingDetails.full_name || '';
+            let mobileNumber = currentBookingDetails.mobile_number || '';
+            let emailAddress = currentBookingDetails.email_id || '';
+
+            // Try to extract name from queryText if not already present
+            if (!fullName) {
+                const nameRegex = /([A-Za-z'-]+(?:\s+[A-Za-z'-]+){0,2})/; // Captures 1 to 3 words with hyphens/apostrophes
+                const nameMatch = queryText.match(nameRegex);
+                if (nameMatch && nameMatch[1]) {
+                    fullName = nameMatch[1].trim();
+                    console.log(`DEBUG: Default Fallback - Extracted name: ${fullName}`);
+                }
+            }
+
+            // Try to extract email from queryText
+            if (!emailAddress) {
+                const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/;
+                const emailMatch = queryText.match(emailRegex);
+                if (emailMatch && emailMatch[0]) {
+                    emailAddress = emailMatch[0].trim();
+                    console.log(`DEBUG: Default Fallback - Extracted email: ${emailAddress}`);
+                }
+            }
+
+            // Try to extract phone number from queryText (more flexible regex)
+            if (!mobileNumber) {
+                const phoneRegex = /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/; // Matches various phone formats
+                const phoneMatch = queryText.match(phoneRegex);
+                if (phoneMatch && phoneMatch[0]) {
+                    mobileNumber = phoneMatch[0].trim();
+                    console.log(`DEBUG: Default Fallback - Extracted phone: ${mobileNumber}`);
+                }
+            }
+
+            // Update bookingDetails in context
+            currentBookingDetails.full_name = fullName;
+            currentBookingDetails.mobile_number = mobileNumber;
+            currentBookingDetails.email_id = emailAddress;
+
+            let finalConfirmationPrompt;
+            let outputContextsToSet = [
+                {
+                    name: `${session}/contexts/booking-flow`,
+                    lifespanCount: 5,
+                    parameters: currentBookingDetails
+                }
+            ];
+
+            if (fullName && mobileNumber && emailAddress) {
+                console.log("DEBUG: Default Fallback - All contact details collected.");
+                const { date, time } = formatDubai(currentBookingDetails.bookingUTC);
+                const venueName = currentBookingDetails.venue || "the selected venue";
+
+                let summaryText;
+                if (currentBookingDetails.type === 'group') {
+                    summaryText = `Alright, ${fullName}, let's summarize your group inquiry:\n`;
+                    summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+                    summaryText += `Date: ${date} at ${time}\n`;
+                    summaryText += `Venue: ${venueName}\n`;
+                    summaryText += `Email: ${currentBookingDetails.email_id}\n`;
+                    summaryText += `Mobile: ${currentBookingDetails.mobile_number}\n`;
+                    summaryText += `Is this all correct? (Yes/No)`;
+                } else { // It's a table booking (<10 guests)
+                    summaryText = `Alright, ${fullName}, let's summarize your table reservation:\n`;
+                    summaryText += `Guests: ${currentBookingDetails.guestCount}\n`;
+                    summaryText += `Date: ${date} at ${time}\n`;
+                    summaryText += `Venue: ${venueName}\n`;
+                    summaryText += `Is this all correct? (Yes/No)`;
+                }
+                finalConfirmationPrompt = await generateGeminiReply(summaryText);
+
+                outputContextsToSet.push({
+                    name: `${session}/contexts/awaiting-final-confirmation`,
+                    lifespanCount: 2,
+                    parameters: {
+                        full_name: fullName,
+                        mobile_number: mobileNumber,
+                        email_id: emailAddress
+                    }
+                });
+                outputContextsToSet.push({
+                    name: `${session}/contexts/awaiting-contact-details`,
+                    lifespanCount: 0, // Clear this context
+                });
+
+            } else {
+                console.log("DEBUG: Default Fallback - Missing some contact details. Reprompting.");
+                let missingFields = [];
+                if (!fullName) missingFields.push("full name");
+                if (!mobileNumber) missingFields.push("mobile number");
+                if (!emailAddress) missingFields.push("email address");
+
+                finalConfirmationPrompt = await generateGeminiReply(`I still need your ${missingFields.join(' and ')} to finalize the booking.`);
+
+                outputContextsToSet.push({
+                    name: `${session}/contexts/awaiting-contact-details`,
+                    lifespanCount: 2, // Keep active
+                    parameters: {
+                        personName: fullName,
+                        phoneNumber: mobileNumber,
+                        emailAddress: emailAddress
+                    }
+                });
+            }
+            return res.json({
+                fulfillmentText: finalConfirmationPrompt,
+                outputContexts: outputContextsToSet
+            });
+
+        } else if (bookingFlowCtx) {
+            // Generic fallback if booking-flow context is active but not awaiting contact details
+            return res.json({ fulfillmentText: await generateGeminiReply("I'm sorry, I didn't understand that. Please tell me more about your booking preference or try rephrasing.") });
+        } else {
+            // Generic fallback if no relevant context is active
+            return res.json({ fulfillmentText: await generateGeminiReply("I didn't quite catch that. Could you please rephrase or tell me what you'd like to do?") });
+        }
+    }
+
 
     // Removed duplicate formatDubai function from here.
     // The one at the top is used.
 
-    // If intent is not handled
+    // If intent is not handled (this line will be hit if no specific intent handler above matches)
     return res.json({
         fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
     });
