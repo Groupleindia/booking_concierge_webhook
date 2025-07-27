@@ -5,6 +5,7 @@ const axios = require("axios");
 const dotenv = require("dotenv");
 const moment = require("moment-timezone");
 const nodemailer = require('nodemailer'); // NEW: For sending emails
+
 let fetch; // Declare fetch here, it will be assigned dynamically
 
 // Use an immediately invoked async function to import node-fetch
@@ -135,10 +136,12 @@ async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
   let toneInstruction;
   if (isSummaryConfirmation) {
       // For summary, explicitly tell Gemini to reiterate and then ask for confirmation
-      toneInstruction = '\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**';
+      // CHANGED TO BACKTICKS
+      toneInstruction = `\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**`;
   } else {
       // General tone instruction
-      toneInstruction = '\n\nTone: You are the official booking concierge for the venue. Use a warm, professional, and helpful voice. Speak directly to the user. Do NOT use phrases like "Here's what I know," "It sounds like," or "I understand." Avoid emojis, technical terms, and overly conversational fillers. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**';
+      // CHANGED TO BACKTICKS
+      toneInstruction = `\n\nTone: You are the official booking concierge for the venue. Use a warm, professional, and helpful voice. Speak directly to the user. Do NOT use phrases like "Here's what I know," "It sounds like," or "I understand." Avoid emojis, technical terms, and overly conversational fillers. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**`;
   }
 
   const payload = {
@@ -266,7 +269,7 @@ async function createBooking(bookingDetails, status) {
       phone_no: bookingDetails.mobile_number,
       email: bookingDetails.email_id,
       // MODIFIED: 'Table Booking' changed to 'General Reservation'
-      booking_type: bookingDetails.type === 'table' ? 'General Reservation' : 'Group Booking', 
+      booking_type: bookingDetails.type === 'table' ? 'General Reservation' : 'Group Booking',
       event_date_time: eventDateTime, // Combined date and time string
       guest_count: bookingDetails.guestCount, // Corrected from guest_count to guestCount
       "Status": status, // CHANGED: From 'Booking Status' to 'Status' to match CSV
@@ -588,7 +591,7 @@ app.post("/webhook", async (req, res) => {
     if (intent === "Ask Venue Details Intent") { // Corrected intent name with spaces
       console.log(`DEBUG: Entering Ask Venue Details Intent.`);
       // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
-      let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
+      let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name');
 
       if (Array.isArray(venueRaw)) {
           venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
@@ -597,7 +600,7 @@ app.post("/webhook", async (req, res) => {
           venueRaw = venueRaw.name; // If it's an object with a 'name' property
       }
       // Ensure venueRaw is definitely a string before proceeding
-      venueRaw = String(venueRaw || '').trim(); 
+      venueRaw = String(venueRaw || '').trim();
 
       console.log(`DEBUG: Ask Venue Details Intent - venueRaw (after string conversion and trim): '${venueRaw}' (type: ${typeof venueRaw})`);
 
@@ -661,12 +664,12 @@ app.post("/webhook", async (req, res) => {
       currentBookingDetails.venue = venue.space_name;
       currentBookingDetails.venue_id = match.id; // Store venue ID here
 
-      return res.json({ 
+      return res.json({
         fulfillmentText: reply,
         outputContexts: [
           {
             name: `${session}/contexts/booking-flow`,
-            lifespanCount: 5, 
+            lifespanCount: 5,
             parameters: currentBookingDetails, // Ensure updated parameters are passed
           },
         ],
@@ -677,7 +680,7 @@ app.post("/webhook", async (req, res) => {
     if (intent === "Select Venue Intent") {
         console.log(`DEBUG: Entering Select Venue Intent.`);
         // Prioritize 'venue_name' as per user's request, fallback to 'space_name'
-        let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name'); 
+        let venueRaw = getParameter(req.body, 'venue_name') || getParameter(req.body, 'space_name');
         if (Array.isArray(venueRaw)) {
             venueRaw = venueRaw[venueRaw.length - 1]; // Take the last element if it's an array
         }
@@ -685,7 +688,7 @@ app.post("/webhook", async (req, res) => {
             venueRaw = venueRaw.name; // If it's an object with a 'name' property
         }
         // Ensure venueRaw is definitely a string before proceeding
-        venueRaw = String(venueRaw || '').trim(); 
+        venueRaw = String(venueRaw || '').trim();
 
         console.log(`DEBUG: Select Venue Intent - venueRaw (after string conversion and trim): '${venueRaw}' (type: ${typeof venueRaw})`);
 
@@ -880,7 +883,7 @@ app.post("/webhook", async (req, res) => {
             }
 
             // Pass isSummaryConfirmation = true to generateGeminiReply
-            finalConfirmationPrompt = await generateGeminiReply(summaryText, true); 
+            finalConfirmationPrompt = await generateGeminiReply(summaryText, true);
 
             outputContexts.push({
                 name: `${session}/contexts/awaiting-final-confirmation`, // New context to await final confirmation
