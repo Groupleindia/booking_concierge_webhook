@@ -942,122 +942,61 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-      // ✅ Confirm Booking Intent (NEW HANDLER) - REPLACE THIS ENTIRE BLOCK
-      if (intent === "ConfirmBooking") {
-          console.log("DEBUG: Entering ConfirmBooking Intent.");
-          const bookingFlowCtx = findContext("booking-flow", contexts);
+    // ✅ Confirm Booking Intent (NEW HANDLER)
+    if (intent === "ConfirmBooking") {
+        console.log(`DEBUG: Entering ConfirmBooking Intent.`);
+        const bookingFlowCtx = findContext("booking-flow", contexts);
 
-          if (!bookingFlowCtx || !bookingFlowCtx.parameters) {
-              console.error("❌ ConfirmBooking: No booking-flow context or parameters found.");
-              return res.json({
-                  fulfillmentText: await generateGeminiReply("I apologize, I seem to have lost track of your booking details. Could you please start over?")
-              });
-          }
+        if (!bookingFlowCtx || !bookingFlowCtx.parameters) {
+            console.error("❌ ConfirmBooking: booking-flow context or its parameters not found.");
+            return res.json({
+                fulfillmentText: await generateGeminiReply("I apologize, I seem to have lost track of your booking details. Could you please start over?")
+            });
+        }
 
-          const bookingDetails = bookingFlowCtx.parameters;
-          console.log("DEBUG: ConfirmBooking: Retrieved booking details from context:", bookingDetails);
+        const bookingDetails = bookingFlowCtx.parameters;
+        console.log(`DEBUG: ConfirmBooking: Retrieved booking details from context: ${JSON.stringify(bookingDetails, null, 2)}`);
 
-          const {
-              type,
-              guestCount,
-              bookingDate,
-              bookingTime,
-              venue_name,
-              venue_id,
-              full_name,
-              email_id,
-              mobile_number,
-              bookingUTC
-          } = bookingDetails;
+        // Perform booking creation in Airtable
+        try {
+            await createBooking(bookingDetails, 'Confirmed'); // Set status to 'Confirmed'
+            console.log("DEBUG: Booking successfully created in Airtable.");
 
-          if (!type || !guestCount || !bookingDate || !bookingTime || !venue_name || !venue_id || !full_name || !email_id || !mobile_number || !bookingUTC) {
-              console.error("❌ ConfirmBooking: Missing one or more required booking details.");
-              return res.json({
-                  fulfillmentText: await generateGeminiReply("I'm sorry, some essential booking details are missing. Please try again from the beginning.")
-              });
-          }
+            let confirmationMessage;
+            if (bookingDetails.type === 'group') {
+                // For group bookings, send email and provide specific confirmation
+                const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
+                if (emailSent) {
+                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
+                } else {
+                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly. (Note: There was an issue sending the email with packages, please check your webhook logs.)`;
+                }
+            } else {
+                // For table bookings, provide simple confirmation
+                confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
+            }
 
-          // --- Prepare the immediate response to Dialogflow ---
-          const confirmationMessageForGemini = `Excellent! Your ${type} booking for ${guestCount} guests at ${venue_name} on ${moment.tz(bookingUTC, 'Asia/Dubai').format('dddd, DD MMMM')} at ${moment.tz(bookingUTC, 'Asia/Dubai').format('h:mm A')} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${email_id}.`;
+            return res.json({
+                fulfillmentText: await generateGeminiReply(confirmationMessage),
+                outputContexts: [
+                    {
+                        name: `${session}/contexts/booking-flow`,
+                        lifespanCount: 0 // Clear booking-flow context to end the session
+                    },
+                    {
+                        name: `${session}/contexts/awaiting-final-confirmation`,
+                        lifespanCount: 0 // Clear this context as well
+                    }
+                ]
+            });
 
-          const fulfillmentTextReply = await generateGeminiReply(confirmationMessageForGemini, false, true); // Corrected: isFinalConfirmation: true
-
-          // Send the immediate response to Dialogflow to prevent timeout
-          res.json({
-              fulfillmentText: fulfillmentTextReply,
-              outputContexts: [
-                  {
-                      name: `${session}/contexts/booking-flow`,
-                      lifespanCount: 0 // Clear booking-flow context to end the session
-                  },
-                  {
-                      name: `${session}/contexts/awaiting-final-confirmation`,
-                      lifespanCount: 0 // Clear this context as well
-                  }
-              ]
-          });
-
-          // --- Perform the time-consuming operations asynchronously (after sending response) ---
-          (async () => {
-              try {
-                  // Determine the status based on booking type
-                  const airtableStatus = type === 'group' ? "New Lead" : "Confirmed"; // Conditional status logic
-
-                  // 1. Create booking in Airtable (direct axios.post call, assuming axios is imported)
-                  const airtableResponse = await axios.post(
-                      `https://api.airtable.com/v0/${process.env.BASE_ID}/${process.env.AIRTABLE_BOOKINGS_TABLE_ID}`,
-                      {
-                          fields: {
-                              "booking_type": type,
-                              "guest_count": parseInt(guestCount),
-                              "guest_name": full_name,
-                              "email": email_id,
-                              "phone_no": mobile_number,
-                              "event_date_time": moment.tz(bookingUTC, 'Asia/Dubai').format(),
-                              "storage_time_utc": bookingUTC,
-                              "space_name": venue_name,
-                              "space_id": venue_id,
-                              "Status": airtableStatus // Use the conditional status
-                          }
-                      },
-                      {
-                          headers: {
-                              "Authorization": `Bearer ${process.env.AIRTABLE_TOKEN}`,
-                              "Content-Type": "application/json"
-                          }
-                      }
-                  );
-                  console.log("DEBUG: Booking successfully created in Airtable with status:", airtableStatus);
-                  const bookingId = airtableResponse.data.id;
-
-                  // 2. Send confirmation email with PDF (assuming sendEmailWithPdf is defined)
-                  const emailSubject = `Your Booking Confirmation for ${venue_name}`;
-                  const emailBody = `Dear ${full_name},\n\nYour ${type} booking for ${guestCount} guests at ${venue_name} on ${moment.tz(bookingUTC, 'Asia/Dubai').format('dddd, DD MMMM')} at ${moment.tz(bookingUTC, 'Asia/Dubai').format('h:mm A')} has been confirmed.\n\nA manager will be in touch with you shortly to finalize any details and discuss event packages. We've attached our event packages for your review.\n\nThank you for choosing us!\n\nBest regards,\nThe Concierge Team`;
-
-                  const pdfAttachment = {
-                      filename: 'Event_Packages.pdf',
-                      path: process.env.PDF_URL, // Ensure this URL is correctly set in your .env
-                      contentType: 'application/pdf'
-                  };
-
-                  const emailSent = await sendEmailWithPdf(
-                      email_id,
-                      emailSubject,
-                      emailBody,
-                      pdfAttachment
-                  );
-
-                  if (emailSent) {
-                      console.log(`📧 Email sent successfully to ${email_id}`);
-                  } else {
-                      console.error(`❌ Failed to send email to ${email_id}`);
-                  }
-
-              } catch (error) {
-                  console.error("❌ Async operation error (Airtable/Email):", error.response ? error.response.data : error.message);
-              }
-          })();
-      }
+        } catch (error) {
+            console.error("❌ Error confirming booking:", error.message);
+            return res.json({
+                fulfillmentText: await generateGeminiReply("I'm sorry, there was an issue confirming your booking. Please try again later or contact us directly.")
+            });
+        }
+    }
 
 
     // If intent is not handled (this line will be hit if no specific intent handler above matches)
