@@ -942,7 +942,7 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-      // ✅ Confirm Booking Intent (REVISED ASYNC FLOW)
+      // ✅ Confirm Booking Intent (FINAL REVISED ASYNC FLOW - with name fix)
       if (intent === "ConfirmBooking") {
           console.log(`DEBUG: Entering ConfirmBooking Intent.`);
           const bookingFlowCtx = findContext("booking-flow", contexts);
@@ -961,13 +961,14 @@ app.post("/webhook", async (req, res) => {
           const isGroupBooking = bookingDetails.type === 'group';
 
           if (isGroupBooking) {
-              confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
+              // INCLUDE full_name IN THE MESSAGE FOR GEMINI
+              confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} for ${bookingDetails.full_name} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
           } else {
-              confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
+              // INCLUDE full_name IN THE MESSAGE FOR GEMINI
+              confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} for ${bookingDetails.full_name} has been confirmed. We look forward to seeing you!`;
           }
 
           // --- STEP 1: IMMEDIATELY SEND RESPONSE TO DIALOGFLOW ---
-          // This ensures the confirmation message appears quickly.
           res.json({
               fulfillmentText: await generateGeminiReply(confirmationMessage),
               outputContexts: [
@@ -983,18 +984,14 @@ app.post("/webhook", async (req, res) => {
           });
 
           // --- STEP 2: INITIATE ASYNCHRONOUS BACKGROUND OPERATIONS ---
-          // We're using Promise.resolve().then() to schedule these tasks
-          // to run on the next tick of the event loop, after the response has been sent.
-          Promise.resolve().then(async () => { // <--- KEY CHANGE HERE
-              console.log("DEBUG: Asynchronous background task started (using Promise.resolve().then)."); // <--- LOOK FOR THIS LOG
+          Promise.resolve().then(async () => {
+              console.log("DEBUG: Asynchronous background task started (using Promise.resolve().then).");
               try {
                   const airtableStatus = isGroupBooking ? "New Lead" : "Confirmed";
 
-                  // Perform booking creation in Airtable
                   await createBooking(bookingDetails, airtableStatus);
                   console.log(`DEBUG: Booking successfully created in Airtable with status: ${airtableStatus}.`);
 
-                  // If it's a group booking, send email with PDF
                   if (isGroupBooking) {
                       const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
                       if (emailSent) {
@@ -1007,9 +1004,10 @@ app.post("/webhook", async (req, res) => {
               } catch (error) {
                   console.error("❌ Error in background booking confirmation task (Promise.resolve.then):", error.message);
               }
-          }); // No 'return;' here, as the response was already sent.
-             // The main function will implicitly return after this block.
+          });
 
+          // --- STEP 3: Ensure the main webhook function exits after sending the first response ---
+          return;
       }
 
       // Your existing fallback for unhandled intents (outside this block)
