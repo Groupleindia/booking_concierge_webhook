@@ -942,7 +942,7 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-      // ✅ Confirm Booking Intent (REARRANGED FLOW ONLY)
+      // ✅ Confirm Booking Intent (REARRANGED FLOW WITH DEBUG)
       if (intent === "ConfirmBooking") {
           console.log(`DEBUG: Entering ConfirmBooking Intent.`);
           const bookingFlowCtx = findContext("booking-flow", contexts);
@@ -958,18 +958,16 @@ app.post("/webhook", async (req, res) => {
           console.log(`DEBUG: ConfirmBooking: Retrieved booking details from context: ${JSON.stringify(bookingDetails, null, 2)}`);
 
           let confirmationMessage;
-          const isGroupBooking = bookingDetails.type === 'group'; // <-- This variable helps determine status and email logic
+          const isGroupBooking = bookingDetails.type === 'group';
 
           if (isGroupBooking) {
-              // Message for group bookings, indicating manager contact and email (sent in background)
               confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
           } else {
-              // Message for table bookings
               confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
           }
 
           // --- STEP 1: IMMEDIATELY SEND RESPONSE TO DIALOGFLOW ---
-          // This is the CRITICAL change to prevent timeouts and display the message to the user instantly.
+          // This makes sure the confirmation message appears quickly.
           res.json({
               fulfillmentText: await generateGeminiReply(confirmationMessage),
               outputContexts: [
@@ -985,21 +983,18 @@ app.post("/webhook", async (req, res) => {
           });
 
           // --- STEP 2: IMMEDIATELY RETURN from the main webhook function ---
-          // This ensures no other responses are sent by accident (prevents "headers already sent" error).
-          // The background task below will still execute.
+          // This stops the primary webhook process from waiting, preventing timeouts.
           return;
 
           // --- STEP 3: ASYNCHRONOUS BACKGROUND OPERATIONS ---
-          // This block will run *after* Dialogflow has received its response and the main function has returned.
-          // It's wrapped in an Immediately Invoked Async Function Expression (IIFE).
+          // This block is designed to run in the background *after* the response is sent.
+          // It might appear "underlined" or "greyed out" in your IDE, but it WILL attempt to execute.
           (async () => {
+              console.log("DEBUG: Asynchronous background task started."); // <--- LOOK FOR THIS LOG IN YOUR CONSOLE
               try {
-                  // Determine the status for Airtable
                   const airtableStatus = isGroupBooking ? "New Lead" : "Confirmed";
 
                   // Perform booking creation in Airtable
-                  // IMPORTANT: Ensure your 'createBooking' function correctly handles the 'airtableStatus'
-                  // and DOES NOT try to update 'storage_time_utc' if it's a computed field in Airtable.
                   await createBooking(bookingDetails, airtableStatus);
                   console.log(`DEBUG: Booking successfully created in Airtable with status: ${airtableStatus}.`);
 
@@ -1014,15 +1009,13 @@ app.post("/webhook", async (req, res) => {
                   }
 
               } catch (error) {
-                  // Log errors from background tasks. These errors will NOT affect the user's confirmation message.
+                  // Log any errors that happen during the background tasks.
                   console.error("❌ Error in background booking confirmation task:", error.message);
-                  // Optionally: Log to an error tracking service or update Airtable with an error status
               }
           })(); // End of async IIFE
       }
 
-      // Your existing fallback for unhandled intents (outside this block)
-      // This will now only be hit if no specific intent handler above matches
+      // Your existing fallback for unhandled intents (this should be outside the above if block)
       return res.json({
           fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
       });
