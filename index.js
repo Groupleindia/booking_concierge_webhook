@@ -130,17 +130,18 @@ function getParameter(dialogflowRequest, paramName) {
  * @param {boolean} [isSummaryConfirmation=false] - If true, adjusts tone for summary confirmation.
  * @returns {Promise<string>} - The generated text response.
  */
-async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
+async function generateGeminiReply(prompt, isSummaryConfirmation = false, isFinalConfirmation = false) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   let toneInstruction;
-  if (isSummaryConfirmation) {
+  if (isFinalConfirmation) { // <-- THIS IS THE NEW CONDITION
+      // NEW: Extremely strict tone for final confirmation
+      toneInstruction = `\n\nTone: You are the official booking concierge. Use a warm, professional, and helpful voice. Speak directly to the user. Be concise. **IMPORTANT: You MUST ONLY confirm the booking using the exact information provided in the prompt. Do NOT ask any follow-up questions. Do NOT introduce new topics or offers (e.g., packages, add-ons). This is the final confirmation message.**`;
+  } else if (isSummaryConfirmation) {
       // For summary, explicitly tell Gemini to reiterate and then ask for confirmation
-      // CHANGED TO BACKTICKS
       toneInstruction = `\n\nTone: Use a warm, conversational voice. Be helpful and clear. Avoid emojis and technical terms. **IMPORTANT: Reiterate the provided summary exactly as given, and then ask "Is this all correct? (Yes/No)". Do NOT just respond with "Yes" or "No".**`;
   } else {
       // General tone instruction
-      // CHANGED TO BACKTICKS
       toneInstruction = `\n\nTone: You are the official booking concierge for the venue. Use a warm, professional, and helpful voice. Speak directly to the user. Do NOT use phrases like "Here's what I know," "It sounds like," or "I understand." Avoid emojis, technical terms, and overly conversational fillers. Be concise. **IMPORTANT: Stick ONLY to the information and questions explicitly contained in the prompt. Do NOT add any extra information, suggestions, or unrequested follow-up questions (e.g., about preferences like "vibe" or "cuisine"). When provided with a list of options, you MUST list ALL of them clearly and explicitly, without filtering or summarizing. Just present the list and ask if any work.**`;
   }
 
