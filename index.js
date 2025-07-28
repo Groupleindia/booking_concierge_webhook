@@ -942,7 +942,7 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-      // ✅ Confirm Booking Intent (REARRANGED FLOW WITH DEBUG)
+      // ✅ Confirm Booking Intent (REVISED ASYNC FLOW)
       if (intent === "ConfirmBooking") {
           console.log(`DEBUG: Entering ConfirmBooking Intent.`);
           const bookingFlowCtx = findContext("booking-flow", contexts);
@@ -967,7 +967,7 @@ app.post("/webhook", async (req, res) => {
           }
 
           // --- STEP 1: IMMEDIATELY SEND RESPONSE TO DIALOGFLOW ---
-          // This makes sure the confirmation message appears quickly.
+          // This ensures the confirmation message appears quickly.
           res.json({
               fulfillmentText: await generateGeminiReply(confirmationMessage),
               outputContexts: [
@@ -982,15 +982,11 @@ app.post("/webhook", async (req, res) => {
               ]
           });
 
-          // --- STEP 2: IMMEDIATELY RETURN from the main webhook function ---
-          // This stops the primary webhook process from waiting, preventing timeouts.
-          return;
-
-          // --- STEP 3: ASYNCHRONOUS BACKGROUND OPERATIONS ---
-          // This block is designed to run in the background *after* the response is sent.
-          // It might appear "underlined" or "greyed out" in your IDE, but it WILL attempt to execute.
-          (async () => {
-              console.log("DEBUG: Asynchronous background task started."); // <--- LOOK FOR THIS LOG IN YOUR CONSOLE
+          // --- STEP 2: INITIATE ASYNCHRONOUS BACKGROUND OPERATIONS ---
+          // We're using Promise.resolve().then() to schedule these tasks
+          // to run on the next tick of the event loop, after the response has been sent.
+          Promise.resolve().then(async () => { // <--- KEY CHANGE HERE
+              console.log("DEBUG: Asynchronous background task started (using Promise.resolve().then)."); // <--- LOOK FOR THIS LOG
               try {
                   const airtableStatus = isGroupBooking ? "New Lead" : "Confirmed";
 
@@ -1009,13 +1005,14 @@ app.post("/webhook", async (req, res) => {
                   }
 
               } catch (error) {
-                  // Log any errors that happen during the background tasks.
-                  console.error("❌ Error in background booking confirmation task:", error.message);
+                  console.error("❌ Error in background booking confirmation task (Promise.resolve.then):", error.message);
               }
-          })(); // End of async IIFE
+          }); // No 'return;' here, as the response was already sent.
+             // The main function will implicitly return after this block.
+
       }
 
-      // Your existing fallback for unhandled intents (this should be outside the above if block)
+      // Your existing fallback for unhandled intents (outside this block)
       return res.json({
           fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
       });
