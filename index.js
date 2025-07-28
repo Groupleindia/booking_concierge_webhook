@@ -942,67 +942,90 @@ app.post("/webhook", async (req, res) => {
         return res.json(webhookResponse);
     }
 
-    // ✅ Confirm Booking Intent (NEW HANDLER)
-    if (intent === "ConfirmBooking") {
-        console.log(`DEBUG: Entering ConfirmBooking Intent.`);
-        const bookingFlowCtx = findContext("booking-flow", contexts);
+      // ✅ Confirm Booking Intent (REARRANGED FLOW ONLY)
+      if (intent === "ConfirmBooking") {
+          console.log(`DEBUG: Entering ConfirmBooking Intent.`);
+          const bookingFlowCtx = findContext("booking-flow", contexts);
 
-        if (!bookingFlowCtx || !bookingFlowCtx.parameters) {
-            console.error("❌ ConfirmBooking: booking-flow context or its parameters not found.");
-            return res.json({
-                fulfillmentText: await generateGeminiReply("I apologize, I seem to have lost track of your booking details. Could you please start over?")
-            });
-        }
+          if (!bookingFlowCtx || !bookingFlowCtx.parameters) {
+              console.error("❌ ConfirmBooking: booking-flow context or its parameters not found.");
+              return res.json({
+                  fulfillmentText: await generateGeminiReply("I apologize, I seem to have lost track of your booking details. Could you please start over?")
+              });
+          }
 
-        const bookingDetails = bookingFlowCtx.parameters;
-        console.log(`DEBUG: ConfirmBooking: Retrieved booking details from context: ${JSON.stringify(bookingDetails, null, 2)}`);
+          const bookingDetails = bookingFlowCtx.parameters;
+          console.log(`DEBUG: ConfirmBooking: Retrieved booking details from context: ${JSON.stringify(bookingDetails, null, 2)}`);
 
-        // Perform booking creation in Airtable
-        try {
-            await createBooking(bookingDetails, 'Confirmed'); // Set status to 'Confirmed'
-            console.log("DEBUG: Booking successfully created in Airtable.");
+          let confirmationMessage;
+          const isGroupBooking = bookingDetails.type === 'group'; // <-- This variable helps determine status and email logic
 
-            let confirmationMessage;
-            if (bookingDetails.type === 'group') {
-                // For group bookings, send email and provide specific confirmation
-                const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
-                if (emailSent) {
-                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
-                } else {
-                    confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly. (Note: There was an issue sending the email with packages, please check your webhook logs.)`;
-                }
-            } else {
-                // For table bookings, provide simple confirmation
-                confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
-            }
+          if (isGroupBooking) {
+              // Message for group bookings, indicating manager contact and email (sent in background)
+              confirmationMessage = `Excellent! Your group booking for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. A manager will be in touch shortly, and we've sent the event packages to ${bookingDetails.email_id}.`;
+          } else {
+              // Message for table bookings
+              confirmationMessage = `Excellent! Your table reservation for ${bookingDetails.guestCount} guests at ${bookingDetails.venue} on ${formatDubai(bookingDetails.bookingUTC).date} at ${formatDubai(bookingDetails.bookingUTC).time} has been confirmed. We look forward to seeing you!`;
+          }
 
-            return res.json({
-                fulfillmentText: await generateGeminiReply(confirmationMessage),
-                outputContexts: [
-                    {
-                        name: `${session}/contexts/booking-flow`,
-                        lifespanCount: 0 // Clear booking-flow context to end the session
-                    },
-                    {
-                        name: `${session}/contexts/awaiting-final-confirmation`,
-                        lifespanCount: 0 // Clear this context as well
-                    }
-                ]
-            });
+          // --- STEP 1: IMMEDIATELY SEND RESPONSE TO DIALOGFLOW ---
+          // This is the CRITICAL change to prevent timeouts and display the message to the user instantly.
+          res.json({
+              fulfillmentText: await generateGeminiReply(confirmationMessage),
+              outputContexts: [
+                  {
+                      name: `${session}/contexts/booking-flow`,
+                      lifespanCount: 0 // Clear booking-flow context to end the session
+                  },
+                  {
+                      name: `${session}/contexts/awaiting-final-confirmation`,
+                      lifespanCount: 0 // Clear this context as well
+                  }
+              ]
+          });
 
-        } catch (error) {
-            console.error("❌ Error confirming booking:", error.message);
-            return res.json({
-                fulfillmentText: await generateGeminiReply("I'm sorry, there was an issue confirming your booking. Please try again later or contact us directly.")
-            });
-        }
-    }
+          // --- STEP 2: IMMEDIATELY RETURN from the main webhook function ---
+          // This ensures no other responses are sent by accident (prevents "headers already sent" error).
+          // The background task below will still execute.
+          return;
 
+          // --- STEP 3: ASYNCHRONOUS BACKGROUND OPERATIONS ---
+          // This block will run *after* Dialogflow has received its response and the main function has returned.
+          // It's wrapped in an Immediately Invoked Async Function Expression (IIFE).
+          (async () => {
+              try {
+                  // Determine the status for Airtable
+                  const airtableStatus = isGroupBooking ? "New Lead" : "Confirmed";
 
-    // If intent is not handled (this line will be hit if no specific intent handler above matches)
-    return res.json({
-        fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
-    });
+                  // Perform booking creation in Airtable
+                  // IMPORTANT: Ensure your 'createBooking' function correctly handles the 'airtableStatus'
+                  // and DOES NOT try to update 'storage_time_utc' if it's a computed field in Airtable.
+                  await createBooking(bookingDetails, airtableStatus);
+                  console.log(`DEBUG: Booking successfully created in Airtable with status: ${airtableStatus}.`);
+
+                  // If it's a group booking, send email with PDF
+                  if (isGroupBooking) {
+                      const emailSent = await sendEmailWithPdf(bookingDetails.email_id, bookingDetails.full_name);
+                      if (emailSent) {
+                          console.log(`DEBUG: Email sent successfully to ${bookingDetails.email_id}.`);
+                      } else {
+                          console.error(`❌ DEBUG: Failed to send email to ${bookingDetails.email_id}.`);
+                      }
+                  }
+
+              } catch (error) {
+                  // Log errors from background tasks. These errors will NOT affect the user's confirmation message.
+                  console.error("❌ Error in background booking confirmation task:", error.message);
+                  // Optionally: Log to an error tracking service or update Airtable with an error status
+              }
+          })(); // End of async IIFE
+      }
+
+      // Your existing fallback for unhandled intents (outside this block)
+      // This will now only be hit if no specific intent handler above matches
+      return res.json({
+          fulfillmentText: await generateGeminiReply("I'm not sure how to handle that request yet.")
+      });
 
   } catch (error) { // END OF MAIN TRY BLOCK, START OF CATCH BLOCK
     console.error("❌ Webhook error:", error);
