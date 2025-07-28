@@ -190,6 +190,14 @@ async function generateGeminiReply(prompt, isSummaryConfirmation = false) {
 
 // 🔹 Send Email with PDF (for group leads)
 async function sendEmailWithPdf(recipientEmail, recipientName) {
+    // --- START DEBUG LOGS FOR EMAIL CREDENTIALS ---
+    console.log(`DEBUG: Checking EMAIL_SERVICE_USER: ${process.env.EMAIL_SERVICE_USER ? 'Set' : 'NOT Set'}`);
+    console.log(`DEBUG: Checking EMAIL_SERVICE_PASS: ${process.env.EMAIL_SERVICE_PASS ? 'Set' : 'NOT Set'}`);
+    console.log(`DEBUG: Checking EMAIL_SERVICE_HOST: ${process.env.EMAIL_SERVICE_HOST ? 'Set' : 'NOT Set'}`);
+    console.log(`DEBUG: Checking EMAIL_SERVICE_PORT: ${process.env.EMAIL_SERVICE_PORT ? 'Set' : 'NOT Set'}`);
+    console.log(`DEBUG: Checking PDF_URL: ${process.env.PDF_URL ? 'Set' : 'NOT Set'}`);
+    // --- END DEBUG LOGS FOR EMAIL CREDENTIALS ---
+
     if (!process.env.EMAIL_SERVICE_USER || !process.env.EMAIL_SERVICE_PASS || !process.env.EMAIL_SERVICE_HOST || !process.env.EMAIL_SERVICE_PORT) {
         console.warn("⚠️ Email service credentials missing. Skipping email send.");
         return false;
