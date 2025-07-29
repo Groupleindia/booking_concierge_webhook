@@ -396,7 +396,7 @@ app.post("/webhook", async (req, res) => {
                 **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
                 **Start directly with the information about the venues.**
                 **List ALL the provided venue options clearly with bullet points.**
-                **Do NOT filter or ask about preferences like 'vibe'.**
+                **Do NOT filter or ask about preferences like 'vibe'.** 
             `);
 
             outputContexts.push({
