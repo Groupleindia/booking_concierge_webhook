@@ -4,7 +4,10 @@ const express = require("express");
 const axios = require("axios");
 const dotenv = require("dotenv");
 const moment = require("moment-timezone");
-const nodemailer = require('nodemailer'); // NEW: For sending emails
+const nodemailer = require('nodemailer'); // For sending emails
+const VoiceResponse = require('twilio').twiml.VoiceResponse; // For Twilio Voice TwiML responses
+const dialogflow = require('@google-cloud/dialogflow'); // NEW: Dialogflow ES client library
+const { SessionsClient } = dialogflow.v2beta1; // Use v2beta1 for ES
 
 let fetch; // Declare fetch here, it will be assigned dynamically
 
@@ -21,6 +24,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json()); // Middleware to parse JSON request bodies
+// IMPORTANT: Keep this for Twilio voice webhooks as it sends URL-encoded data
+app.use(express.urlencoded({ extended: false }));
+
 
 // --- Environment Variables ---
 // IMPORTANT: Ensure these are set in your .env file on Glitch based on your Airtable setup:
@@ -34,6 +40,27 @@ app.use(express.json()); // Middleware to parse JSON request bodies
 // EMAIL_SERVICE_USER=your_zoho_email@yourdomain.com
 // EMAIL_SERVICE_PASS=your_zoho_app_password_or_regular_password
 // PDF_URL=https://your-domain.com/your-packages.pdf (This PDF URL will still be used in the email for group leads if you want to send it)
+
+// NEW: Dialogflow ES specific environment variables
+// DIALOGFLOW_PROJECT_ID=YOUR_DIALOGFLOW_ES_PROJECT_ID
+// GOOGLE_APPLICATION_CREDENTIALS_JSON=YOUR_SERVICE_ACCOUNT_KEY_JSON_CONTENT (Paste the entire JSON content here)
+
+// Initialize Dialogflow ES SessionsClient
+// This needs to be done using the service account key JSON content
+let sessionClient;
+try {
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+        const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+        sessionClient = new SessionsClient({ credentials });
+        console.log("DEBUG: Dialogflow ES SessionsClient initialized successfully.");
+    } else {
+        console.error("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set. Dialogflow ES integration will fail.");
+    }
+} catch (e) {
+    console.error("❌ Error parsing GOOGLE_APPLICATION_CREDENTIALS_JSON:", e.message);
+    console.error("Please ensure GOOGLE_APPLICATION_CREDENTIALS_JSON contains valid JSON.");
+}
+
 
 // 🔹 Fetch venues from Airtable
 /**
@@ -1035,6 +1062,105 @@ app.post("/webhook", async (req, res) => {
     });
   }
 }); // CLOSING BRACE FOR app.post CALLBACK
+
+// NEW: 🔹 Twilio Voice Webhook Endpoint for Dialogflow ES
+// This endpoint will be called by Twilio when an inbound call is received or when <Gather> sends results.
+app.post('/twilio-voice', async (req, res) => {
+    console.log("DEBUG: Received incoming Twilio voice call request.");
+    const twiml = new VoiceResponse();
+
+    // The unique ID for the session (caller's phone number)
+    const sessionId = req.body.From;
+    const dialogflowProjectId = process.env.DIALOGFLOW_PROJECT_ID;
+
+    if (!sessionClient || !dialogflowProjectId) {
+        console.error("❌ Dialogflow ES SessionsClient not initialized or project ID missing.");
+        twiml.say('I apologize, the booking system is currently unavailable. Please try again later.');
+        res.type('text/xml');
+        return res.status(500).send(twiml.toString());
+    }
+
+    const sessionPath = sessionClient.projectAgentSessionPath(
+        dialogflowProjectId,
+        sessionId
+    );
+
+    let queryInput;
+    const speechResult = req.body.SpeechResult; // Speech-to-text from Twilio
+    const digits = req.body.Digits; // DTMF input from Twilio
+
+    // Determine the input to send to Dialogflow
+    if (speechResult) {
+        console.log(`DEBUG: SpeechResult received: "${speechResult}"`);
+        queryInput = { text: { text: speechResult, languageCode: 'en-US' } };
+    } else if (digits) {
+        console.log(`DEBUG: Digits received: "${digits}"`);
+        queryInput = { text: { text: digits, languageCode: 'en-US' } }; // Treat DTMF as text for Dialogflow
+    } else {
+        // This is the initial call, or if no speech/digits were gathered
+        console.log("DEBUG: Initial call or no input received. Sending empty query to Dialogflow for welcome intent.");
+        queryInput = { event: { name: 'WELCOME', languageCode: 'en-US' } }; // Trigger Dialogflow's default welcome event
+    }
+
+    const request = {
+        session: sessionPath,
+        queryInput: queryInput,
+        // You can add contexts here if needed, but Dialogflow ES handles contexts automatically
+        // based on previous turns.
+    };
+
+    try {
+        const responses = await sessionClient.detectIntent(request);
+        const result = responses[0].queryResult;
+
+        console.log(`DEBUG: Dialogflow ES detected intent: ${result.intent ? result.intent.displayName : 'None'}`);
+        console.log(`DEBUG: Dialogflow ES fulfillment text: "${result.fulfillmentText}"`);
+
+        // Speak Dialogflow's response
+        if (result.fulfillmentText) {
+            twiml.say(result.fulfillmentText);
+        } else {
+            // Fallback if Dialogflow provides no fulfillment text
+            twiml.say("I'm sorry, I didn't get a clear response. Can you please repeat that?");
+        }
+
+        // Check if Dialogflow has indicated the conversation should end
+        // This usually happens when an end-of-conversation intent is triggered
+        // In Dialogflow ES, you might set a custom payload or context to signify this.
+        // For simplicity, we'll assume if the intent is "End Conversation" or similar, we hang up.
+        // You might need to refine this based on your specific Dialogflow agent's design.
+        const endConversationIntents = ["End Conversation", "Thanks", "Goodbye", "ConfirmBooking"]; // Add your ending intents here
+        const isEndIntent = result.intent && endConversationIntents.includes(result.intent.displayName);
+        const endOfConversationContext = result.outputContexts.find(context => context.name.includes('end_of_conversation')); // Example for custom context
+
+        if (isEndIntent || endOfConversationContext) {
+            console.log("DEBUG: Dialogflow ES indicated end of conversation. Hanging up.");
+            twiml.hangup();
+        } else {
+            // Continue the conversation by gathering more input
+            // Configure <Gather> to send results back to this same webhook endpoint
+            twiml.gather({
+                input: 'speech dtmf', // Accept both speech and DTMF tones
+                timeout: 5, // Wait 5 seconds for input
+                action: '/twilio-voice', // Send gathered input back to this endpoint
+                method: 'POST',
+                speechTimeout: 'auto', // Automatically determine end of speech
+            });
+        }
+
+        res.type('text/xml');
+        res.send(twiml.toString());
+        console.log("DEBUG: Sent TwiML response for voice call interaction.");
+
+    } catch (error) {
+        console.error("❌ Error interacting with Dialogflow ES:", error);
+        twiml.say('I apologize, there was an error connecting to our booking agent. Please try again later.');
+        twiml.hangup(); // Hang up on error
+        res.type('text/xml');
+        res.status(500).send(twiml.toString());
+    }
+});
+
 
 // --- Start the Server ---
 const PORT = process.env.PORT || 10000;
