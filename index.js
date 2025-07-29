@@ -387,47 +387,17 @@ app.post("/webhook", async (req, res) => {
             const venues = await getAvailableVenues(guestCount); // Filtered by seated_capacity
             const venueNames = venues.map(v => v.name).join(', ');
 
-            // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid greetings/filtering, and differentiate by booking type
-            let geminiPrompt = ''; // Declare geminiPrompt here
+            // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid greetings/filtering
+            fulfillmentText = await generateGeminiReply(`
+                For your reservation of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, these are the venues available for booking:
+                ${venueNames.split(', ').map(v => `* ${v.trim()}`).join('\n')}
 
-            if (bookingType === 'table') {
-                geminiPrompt = `
-                    For your party of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, these are the table options available for booking:
-                    ${venueNames.map(v => `* ${v.trim()}`).join('\n')}
-
-                    Do any of these work for your table reservation?
-                    **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
-                    **Start directly with the information about the table options and the party size/date/time.**
-                    **List ALL the provided venue options clearly with bullet points.**
-                    **Do NOT filter or ask about preferences like 'vibe'.**
-                `;
-            } else if (bookingType === 'group') { // For group bookings (10 or more guests)
-                geminiPrompt = `
-                    For your group of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, we have these venues suitable for group bookings:
-                    ${venueNames.map(v => `* ${v.trim()}`).join('\n')}
-
-                    Do any of these venues work for your group event?
-                    **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
-                    **Start directly with the information about the group venues and the party size/date/time.**
-                    **List ALL the provided venue options clearly with bullet points.**
-                    **Do NOT filter or ask about preferences like 'vibe'.**
-                    **Emphasize that these are for group events.**
-                `;
-            } else {
-                // Fallback for unexpected bookingType (shouldn't happen if logic is sound)
-                geminiPrompt = `
-                    For your party of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, these are the venues available:
-                    ${venueNames.map(v => `* ${v.trim()}`).join('\n')}
-
-                    Do any of these venues work for you?
-                    **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
-                    **Start directly with the information about the venues and the party size/date/time.**
-                    **List ALL the provided venue options clearly with bullet points.**
-                    **Do NOT filter or ask about preferences like 'vibe'.**
-                `;
-            }
-
-            fulfillmentText = await generateGeminiReply(geminiPrompt);
+                Do any of these venues work for you?
+                **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
+                **Start directly with the information about the venues.**
+                **List ALL the provided venue options clearly with bullet points.**
+                **Do NOT filter or ask about preferences like 'vibe'.**
+            `);
 
             outputContexts.push({
                 name: `${session}/contexts/booking-flow`,
