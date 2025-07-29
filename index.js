@@ -390,13 +390,17 @@ app.post("/webhook", async (req, res) => {
             // MODIFIED PROMPT: Explicitly ask Gemini to list all venues and forbid greetings/filtering
             fulfillmentText = await generateGeminiReply(`
                 For your reservation of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, these are the venues available for booking:
+
                 ${venueNames.split(', ').map(v => `* ${v.trim()}`).join('\n')}
 
                 Do any of these venues work for you?
-                **Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
-                **Start directly with the information about the venues.**
-                **List ALL the provided venue options clearly with bullet points.**
-                **Do NOT filter or ask about preferences like 'vibe'.** 
+
+                **Strictly adhere to the following:**
+                **1. Do NOT include any greetings (e.g., "Good morning", "Good evening", "Hello").**
+                **2. Start the response with the exact sentence: "For your reservation of ${guestCount} on ${formatDubai(bookingUTC).date} at ${formatDubai(bookingUTC).time}, these are the venues available for booking:"**
+                **3. After that sentence, list ALL the provided venue options clearly with bullet points, each on a new line.**
+                **4. Conclude with the exact question: "Do any of these venues work for you?"**
+                **5. Do NOT filter or ask about preferences like 'vibe'.**
             `);
 
             outputContexts.push({
